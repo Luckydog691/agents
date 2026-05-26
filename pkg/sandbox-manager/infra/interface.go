@@ -26,6 +26,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 type SandboxResource struct {
@@ -34,14 +35,48 @@ type SandboxResource struct {
 	DiskSizeMB int64
 }
 
-// TimeoutOptions is the time when Sandbox will be shut down or paused. Zero means never.
-type TimeoutOptions struct {
-	ShutdownTime time.Time
-	PauseTime    time.Time
+type TimeoutUpdateResult struct {
+	Updated bool
 }
 
 type PauseOptions struct {
-	Timeout *TimeoutOptions
+	Timeout *timeout.Options
+}
+
+// ResumeOptions reserves the type for future extensions.
+type ResumeOptions struct{}
+
+type HasTemplateOptions struct {
+	Namespace string
+	Name      string
+}
+
+type HasCheckpointOptions struct {
+	Namespace    string
+	CheckpointID string
+}
+
+type GetClaimedSandboxOptions struct {
+	Namespace string
+	SandboxID string
+}
+
+type SelectSandboxesOptions struct {
+	Namespace string
+	User      string
+}
+
+type SelectSucceededCheckpointsOptions struct {
+	Namespace string
+	User      string
+}
+
+type DeleteCheckpointOptions struct {
+	Namespace    string
+	CheckpointID string
+	// User requesting deletion. If non-empty, infra will verify
+	// the checkpoint's AnnotationOwner matches before proceeding with deletion.
+	User string
 }
 
 type Builder interface {
@@ -51,22 +86,22 @@ type Builder interface {
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
-	HasTemplate(ctx context.Context, name string) bool
-	HasCheckpoint(ctx context.Context, name string) bool
+	HasTemplate(ctx context.Context, opts HasTemplateOptions) bool
+	HasCheckpoint(ctx context.Context, opts HasCheckpointOptions) bool
 	GetCache() cache.Provider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
-	SelectSandboxes(ctx context.Context, user string) ([]Sandbox, error)      // Select Sandboxes based on the options provided
-	GetClaimedSandbox(ctx context.Context, sandboxID string) (Sandbox, error) // Get a Sandbox interface by its ID
-	SelectSucceededCheckpoints(ctx context.Context, user string) ([]CheckpointInfo, error)
+	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)
+	GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (Sandbox, error)
+	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
-	DeleteCheckpoint(ctx context.Context, user string, checkpointID string) error
+	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
 }
 
 type Sandbox interface {
-	metav1.Object                                       // For K8s object metadata access
-	Pause(ctx context.Context, opts PauseOptions) error // Pause a Sandbox
-	Resume(ctx context.Context) error                   // Resume a paused Sandbox
+	metav1.Object                                         // For K8s object metadata access
+	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
+	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
 	GetSandboxID() string
 	GetRoute() proxy.Route
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)
@@ -76,9 +111,9 @@ type Sandbox interface {
 	GetImage() string
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
-	SetTimeout(opts TimeoutOptions)
-	SaveTimeout(ctx context.Context, opts TimeoutOptions) error
-	GetTimeout() TimeoutOptions
+	SetTimeout(opts timeout.Options)
+	SaveTimeoutWithPolicy(ctx context.Context, opts timeout.Options, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
+	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest

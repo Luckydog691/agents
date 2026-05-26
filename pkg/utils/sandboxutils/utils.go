@@ -107,3 +107,43 @@ func IsSandboxReady(sbx *agentsv1alpha1.Sandbox) bool {
 	readyCond := utils.GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionReady))
 	return readyCond != nil && readyCond.Status == metav1.ConditionTrue
 }
+
+// IsSandboxPausable returns true when the pausing operation will not cause any conflict.
+func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
+	if IsControlledBySandboxSet(sbx) {
+		state, _ := GetSandboxState(sbx)
+		switch state {
+		case agentsv1alpha1.SandboxStateAvailable, agentsv1alpha1.SandboxStateCreating:
+			return false, "SandboxStateNotAllowed"
+		}
+	}
+	switch sbx.Status.Phase {
+	case agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused:
+		return true, "SandboxIsRunningOrPaused"
+	default:
+		return false, "SandboxPhaseNotAllowed"
+	}
+}
+
+// IsSandboxResumable returns true when the resuming operation will not cause any conflict.
+func IsSandboxResumable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
+	switch sbx.Status.Phase {
+	case agentsv1alpha1.SandboxRunning:
+		if sbx.Spec.Paused {
+			return false, "SandboxIsPausing"
+		}
+		return true, "SandboxIsRunning"
+	case agentsv1alpha1.SandboxResuming:
+		return true, "SandboxIsResuming"
+	default:
+	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
+		pauseCond := utils.GetSandboxCondition(&sbx.Status, string(agentsv1alpha1.SandboxConditionPaused))
+		paused := pauseCond != nil && pauseCond.Status == metav1.ConditionTrue
+		if paused {
+			return true, "SandboxIsPaused"
+		}
+		return false, "SandboxIsPausing"
+	}
+	return false, "SandboxPhaseNotAllowed"
+}

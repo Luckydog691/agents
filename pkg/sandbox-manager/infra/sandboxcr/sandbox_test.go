@@ -18,28 +18,44 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/proxyutils"
+	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -71,6 +87,609 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 		sbx.Spec.Paused = true
 	}
 	return sbx
+}
+
+func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	timeoutPtr := func(opts timeout.Options) *timeout.Options {
+		return &opts
+	}
+
+	tests := []struct {
+		name          string
+		current       timeout.Options
+		baseline      *timeout.Options
+		requested     timeout.Options
+		policy        timeout.UpdatePolicy
+		expectUpdated bool
+		expectTimeout timeout.Options
+		expectError   string
+	}{
+		{
+			name: "always updates when requested timeout differs",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(20 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyAlways,
+			expectUpdated: true,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(20 * time.Minute)},
+		},
+		{
+			name: "always skips when requested timeout matches current",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyAlways,
+			expectUpdated: false,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+		},
+		{
+			name: "extend only updates when requested timeout extends current timeout",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(25 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyExtendOnly,
+			expectUpdated: true,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+		},
+		{
+			name: "extend only skips when requested timeout shortens current timeout",
+			current: timeout.Options{
+				ShutdownTime: base.Add(25 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyExtendOnly,
+			expectUpdated: false,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(25 * time.Minute)},
+		},
+		{
+			name: "baseline aware with matching baseline behaves like always (writes)",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			baseline: timeoutPtr(timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			}),
+			requested: timeout.Options{
+				ShutdownTime: base.Add(18 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyBaselineAware,
+			expectUpdated: true,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(18 * time.Minute)},
+		},
+		{
+			name: "baseline aware with matching baseline skips when timeout equals current",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			baseline: timeoutPtr(timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			}),
+			requested: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyBaselineAware,
+			expectUpdated: false,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(10 * time.Minute)},
+		},
+		{
+			name: "baseline aware with drifted baseline only allows extension",
+			current: timeout.Options{
+				ShutdownTime: base.Add(15 * time.Minute),
+			},
+			baseline: timeoutPtr(timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			}),
+			requested: timeout.Options{
+				ShutdownTime: base.Add(30 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyBaselineAware,
+			expectUpdated: true,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(30 * time.Minute)},
+		},
+		{
+			name: "baseline aware with drifted baseline rejects non extending timeout",
+			current: timeout.Options{
+				ShutdownTime: base.Add(15 * time.Minute),
+			},
+			baseline: timeoutPtr(timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			}),
+			requested: timeout.Options{
+				ShutdownTime: base.Add(12 * time.Minute),
+			},
+			policy:        timeout.UpdatePolicyBaselineAware,
+			expectUpdated: false,
+			expectTimeout: timeout.Options{ShutdownTime: base.Add(15 * time.Minute)},
+		},
+		{
+			name: "baseline aware without baseline returns error",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(20 * time.Minute),
+			},
+			policy:      timeout.UpdatePolicyBaselineAware,
+			expectError: "requires opts.Baseline",
+			expectTimeout: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+		},
+		{
+			name: "unsupported policy returns error without mutating timeout",
+			current: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+			requested: timeout.Options{
+				ShutdownTime: base.Add(20 * time.Minute),
+			},
+			policy:      timeout.UpdatePolicy("Invalid"),
+			expectError: "unsupported timeout update policy",
+			expectTimeout: timeout.Options{
+				ShutdownTime: base.Add(10 * time.Minute),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			setTimeout(sbx, tt.current)
+			CreateSandboxWithStatus(t, fc, sbx)
+
+			var sandbox infra.Sandbox
+			require.Eventually(t, func() bool {
+				var err error
+				sandbox, err = infraInstance.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+					SandboxID: stateutils.GetSandboxID(sbx),
+					Namespace: sbx.Namespace,
+				})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			requested := tt.requested
+			if tt.baseline != nil {
+				requested.Baseline = tt.baseline
+			}
+			result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, tt.policy)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.expectUpdated, result.Updated)
+				assert.True(t, timeout.Equal(tt.expectTimeout, sandbox.GetTimeout()))
+			}
+
+			var updated v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
+			assert.True(t, timeout.Equal(tt.expectTimeout, timeout.GetTimeoutFromSandbox(&updated)))
+		})
+	}
+}
+
+//goland:noinspection GoDeprecation
+func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	var interceptedUpdates atomic.Int32
+	var firstTwoUpdates sync.WaitGroup
+	firstTwoUpdates.Add(2)
+	releaseUpdates := make(chan struct{})
+
+	builder := fake.NewClientBuilder().WithScheme(scheme)
+	for _, idx := range infracache.GetIndexFuncs() {
+		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
+	}
+	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
+	builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if _, ok := obj.(*v1alpha1.Sandbox); ok {
+				if interceptedUpdates.Add(1) <= 2 {
+					firstTwoUpdates.Done()
+					<-releaseUpdates
+				}
+			}
+			return c.Update(ctx, obj, opts...)
+		},
+	})
+	fc := builder.Build()
+
+	mgrBuilder, err := controllers.NewMockManagerBuilder(t)
+	require.NoError(t, err)
+	mgr := mgrBuilder.
+		WithScheme(scheme).
+		WithClient(fc).
+		WithWaitSimulation().
+		Build()
+
+	testCache, err := infracache.NewCache(mgr)
+	require.NoError(t, err)
+	mgr.SetWaitHooks(testCache.GetWaitHooks())
+
+	options := config.InitOptions(config.SandboxManagerOptions{
+		DisableRouteReconciliation: true,
+	})
+	infraInstance := NewInfraBuilder(options).
+		WithCache(testCache).
+		WithAPIReader(fc).
+		WithProxy(proxy.NewServer(options)).
+		Build()
+	require.NoError(t, infraInstance.Run(t.Context()))
+	infraImpl := infraInstance.(*Infra)
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	current := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
+	requested := timeout.Options{ShutdownTime: base.Add(20 * time.Minute)}
+
+	sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+	setTimeout(sbx, current)
+	CreateSandboxWithStatus(t, fc, sbx)
+
+	var sandboxA infra.Sandbox
+	var sandboxB infra.Sandbox
+	require.Eventually(t, func() bool {
+		var getErr error
+		sandboxA, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+			SandboxID: stateutils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
+		})
+		if getErr != nil {
+			return false
+		}
+		sandboxB, getErr = infraImpl.GetClaimedSandbox(t.Context(), infra.GetClaimedSandboxOptions{
+			SandboxID: stateutils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
+		})
+		return getErr == nil
+	}, time.Second, 10*time.Millisecond)
+
+	type saveResult struct {
+		result infra.TimeoutUpdateResult
+		err    error
+	}
+
+	results := make(chan saveResult, 2)
+	go func() {
+		result, saveErr := sandboxA.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
+		results <- saveResult{result: result, err: saveErr}
+	}()
+	go func() {
+		result, saveErr := sandboxB.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyAlways)
+		results <- saveResult{result: result, err: saveErr}
+	}()
+
+	firstTwoUpdates.Wait()
+	close(releaseUpdates)
+
+	first := <-results
+	second := <-results
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+
+	updatedCount := 0
+	for _, item := range []saveResult{first, second} {
+		if item.result.Updated {
+			updatedCount++
+		}
+	}
+	assert.Equal(t, 1, updatedCount)
+	assert.Equal(t, int32(2), interceptedUpdates.Load())
+	assert.True(t, timeout.Equal(requested, sandboxA.GetTimeout()))
+	assert.True(t, timeout.Equal(requested, sandboxB.GetTimeout()))
+
+	var updated v1alpha1.Sandbox
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
+	assert.True(t, timeout.Equal(requested, timeout.GetTimeoutFromSandbox(&updated)))
+}
+
+func TestSandbox_SaveTimeoutWithPolicy_BaselineAwareUsesAPIReaderAfterConflict(t *testing.T) {
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	baseline := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
+	winnerTimeout := timeout.Options{ShutdownTime: base.Add(30 * time.Minute)}
+	requested := timeout.Options{
+		ShutdownTime: base.Add(12 * time.Minute),
+		Baseline:     &baseline,
+	}
+
+	initial := createTestSandboxWithDefaults("test-sandbox", "default")
+	setTimeout(initial, baseline)
+	stale := initial.DeepCopy()
+
+	fc := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&v1alpha1.Sandbox{}).
+		WithObjects(initial).
+		Build()
+
+	provider := &retryUpdateTestProvider{
+		apiReader:      &countingReader{Reader: fc},
+		claimedSandbox: initial,
+	}
+	var updateCalls atomic.Int32
+	provider.client = interceptor.NewClient(fc, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			provider.clientGetCalls.Add(1)
+			if key == client.ObjectKeyFromObject(stale) {
+				stale.DeepCopyInto(obj.(*v1alpha1.Sandbox))
+				return nil
+			}
+			return c.Get(ctx, key, obj, opts...)
+		},
+		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+			if updateCalls.Add(1) != 1 {
+				return errors.New("unexpected second update")
+			}
+
+			latest := &v1alpha1.Sandbox{}
+			if err := c.Get(ctx, client.ObjectKeyFromObject(stale), latest); err != nil {
+				return err
+			}
+			winner := latest.DeepCopy()
+			setTimeout(winner, winnerTimeout)
+			if err := c.Update(ctx, winner); err != nil {
+				return err
+			}
+			return apierrors.NewConflict(
+				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
+				obj.GetName(),
+				errors.New("simulated conflict"),
+			)
+		},
+	})
+
+	sandbox := AsSandbox(stale.DeepCopy(), provider)
+	result, err := sandbox.SaveTimeoutWithPolicy(t.Context(), requested, timeout.UpdatePolicyBaselineAware)
+	require.NoError(t, err)
+	assert.False(t, result.Updated)
+	assert.Equal(t, int32(1), provider.clientGetCalls.Load())
+	assert.Equal(t, int32(1), provider.apiReader.Calls())
+	assert.Equal(t, int32(1), updateCalls.Load())
+	assert.True(t, timeout.Equal(winnerTimeout, sandbox.GetTimeout()))
+
+	updated := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(initial), updated))
+	assert.True(t, timeout.Equal(winnerTimeout, timeout.GetTimeoutFromSandbox(updated)))
+}
+
+type countingReader struct {
+	client.Reader
+
+	getCalls atomic.Int32
+}
+
+func (r *countingReader) Get(ctx context.Context, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+	r.getCalls.Add(1)
+	return r.Reader.Get(ctx, key, obj, opts...)
+}
+
+func (r *countingReader) Calls() int32 {
+	return r.getCalls.Load()
+}
+
+type retryUpdateTestProvider struct {
+	infracache.Provider
+
+	client         client.Client
+	apiReader      *countingReader
+	clientGetCalls atomic.Int32
+	claimedSandbox *v1alpha1.Sandbox
+}
+
+func (p *retryUpdateTestProvider) GetClaimedSandbox(_ context.Context, options infracache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
+	expectedID := stateutils.GetSandboxID(p.claimedSandbox)
+	if options.SandboxID != expectedID {
+		return nil, errors.New("unexpected sandbox ID")
+	}
+	return p.claimedSandbox.DeepCopy(), nil
+}
+
+func (p *retryUpdateTestProvider) GetClient() client.Client {
+	return p.client
+}
+
+func (p *retryUpdateTestProvider) GetAPIReader() client.Reader {
+	return p.apiReader
+}
+
+func newRetryUpdateTestCache(
+	t *testing.T,
+	sbx *v1alpha1.Sandbox,
+	claimedSandbox *v1alpha1.Sandbox,
+	updateInterceptor func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error,
+) (*retryUpdateTestProvider, client.Client) {
+	t.Helper()
+
+	scheme := k8sruntime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+	builder := fake.NewClientBuilder().WithScheme(scheme)
+	for _, idx := range infracache.GetIndexFuncs() {
+		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
+	}
+	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
+	builder = builder.WithObjects(sbx)
+	if updateInterceptor != nil {
+		builder = builder.WithInterceptorFuncs(interceptor.Funcs{Update: updateInterceptor})
+	}
+
+	fc := builder.Build()
+	provider := &retryUpdateTestProvider{
+		apiReader:      &countingReader{Reader: fc},
+		claimedSandbox: claimedSandbox,
+	}
+	provider.client = interceptor.NewClient(fc, interceptor.Funcs{
+		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+			provider.clientGetCalls.Add(1)
+			return c.Get(ctx, key, obj, opts...)
+		},
+	})
+	return provider, fc
+}
+
+func TestSandbox_retryUpdate(t *testing.T) {
+	tests := []struct {
+		name              string
+		initialPaused     bool
+		wrapperPaused     *bool
+		claimedPaused     *bool
+		modifier          func(t *testing.T) ModifierFunc
+		expectUpdated     bool
+		expectUpdateCalls int32
+		expectClientGets  int32
+		expectPaused      bool
+		expectError       string
+	}{
+		{
+			name:          "modifier returns false skips update and refreshes sandbox",
+			initialPaused: false,
+			wrapperPaused: ptr.To(true),
+			claimedPaused: ptr.To(true),
+			modifier: func(t *testing.T) ModifierFunc {
+				return func(sbx *v1alpha1.Sandbox) (bool, error) {
+					assert.False(t, sbx.Spec.Paused)
+					return false, nil
+				}
+			},
+			expectUpdated:     false,
+			expectUpdateCalls: 0,
+			expectClientGets:  1,
+			expectPaused:      false,
+		},
+		{
+			name:          "modifier returns true updates sandbox",
+			initialPaused: true,
+			modifier: func(t *testing.T) ModifierFunc {
+				return func(sbx *v1alpha1.Sandbox) (bool, error) {
+					sbx.Spec.Paused = false
+					return true, nil
+				}
+			},
+			expectUpdated:     true,
+			expectUpdateCalls: 1,
+			expectClientGets:  1,
+			expectPaused:      false,
+		},
+		{
+			name:          "modifier error aborts update",
+			initialPaused: true,
+			modifier: func(t *testing.T) ModifierFunc {
+				return func(sbx *v1alpha1.Sandbox) (bool, error) {
+					sbx.Spec.Paused = false
+					return false, errors.New("modifier failed")
+				}
+			},
+			expectUpdated:     false,
+			expectUpdateCalls: 0,
+			expectClientGets:  1,
+			expectPaused:      true,
+			expectError:       "modifier failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updateCalls atomic.Int32
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			sbx.Spec.Paused = tt.initialPaused
+			claimedSandbox := sbx.DeepCopy()
+			if tt.claimedPaused != nil {
+				claimedSandbox.Spec.Paused = *tt.claimedPaused
+			}
+
+			testCache, fc := newRetryUpdateTestCache(t, sbx, claimedSandbox, func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCalls.Add(1)
+				return c.Update(ctx, obj, opts...)
+			})
+			wrapper := sbx.DeepCopy()
+			if tt.wrapperPaused != nil {
+				wrapper.Spec.Paused = *tt.wrapperPaused
+			}
+			s := AsSandbox(wrapper, testCache)
+
+			updated, err := s.retryUpdate(t.Context(), tt.modifier(t))
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.expectUpdated, updated)
+			assert.Equal(t, tt.expectUpdateCalls, updateCalls.Load())
+			assert.Equal(t, tt.expectClientGets, testCache.clientGetCalls.Load())
+			assert.Equal(t, int32(0), testCache.apiReader.Calls())
+			assert.Equal(t, tt.expectPaused, s.Sandbox.Spec.Paused)
+
+			var stored v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &stored))
+			assert.Equal(t, tt.expectPaused, stored.Spec.Paused)
+		})
+	}
+}
+
+func TestSandbox_retryUpdate_ConflictRefreshesFromAPIReader(t *testing.T) {
+	sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+	sbx.Spec.Paused = true
+
+	var updateAttempts atomic.Int32
+	key := types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}
+	staleClaimedSandbox := sbx.DeepCopy()
+	testCache, fc := newRetryUpdateTestCache(t, sbx, staleClaimedSandbox, func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+		if updateAttempts.Add(1) == 1 {
+			latest := &v1alpha1.Sandbox{}
+			require.NoError(t, c.Get(ctx, key, latest))
+			patched := latest.DeepCopy()
+			patched.Spec.Paused = false
+			require.NoError(t, c.Patch(ctx, patched, client.MergeFrom(latest)))
+			return apierrors.NewConflict(
+				schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
+				obj.GetName(),
+				errors.New("forced conflict"),
+			)
+		}
+		return c.Update(ctx, obj, opts...)
+	})
+
+	s := AsSandbox(sbx.DeepCopy(), testCache)
+	updated, err := s.retryUpdate(t.Context(), func(sbx *v1alpha1.Sandbox) (bool, error) {
+		if !sbx.Spec.Paused {
+			return false, nil
+		}
+		sbx.Spec.Paused = false
+		return true, nil
+	})
+
+	require.NoError(t, err)
+	assert.False(t, updated)
+	assert.Equal(t, int32(1), updateAttempts.Load())
+	assert.Equal(t, int32(1), testCache.clientGetCalls.Load())
+	assert.Equal(t, int32(1), testCache.apiReader.Calls())
+	assert.False(t, s.Sandbox.Spec.Paused)
+
+	var stored v1alpha1.Sandbox
+	require.NoError(t, fc.Get(t.Context(), key, &stored))
+	assert.False(t, stored.Spec.Paused)
 }
 
 func TestSandbox_GetTemplate(t *testing.T) {
@@ -338,7 +957,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 	tests := []struct {
 		name     string
 		sandbox  *v1alpha1.Sandbox
-		expected infra.TimeoutOptions
+		expected timeout.Options
 	}{
 		{
 			name: "with timeout set",
@@ -348,7 +967,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 					PauseTime:    &now,
 				},
 			},
-			expected: infra.TimeoutOptions{
+			expected: timeout.Options{
 				ShutdownTime: future.Time,
 				PauseTime:    now.Time,
 			},
@@ -360,7 +979,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 					ShutdownTime: nil,
 				},
 			},
-			expected: infra.TimeoutOptions{},
+			expected: timeout.Options{},
 		},
 	}
 
@@ -370,7 +989,7 @@ func TestSandbox_GetTimeout(t *testing.T) {
 				Sandbox: tt.sandbox,
 			}
 			result := s.GetTimeout()
-			assert.Equal(t, tt.expected, result)
+			assert.True(t, timeout.Equal(tt.expected, result))
 		})
 	}
 }
@@ -460,101 +1079,36 @@ func TestSandbox_Request(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
-func TestSandbox_SaveTimeout(t *testing.T) {
-	now := time.Now()
-	tests := []struct {
-		name        string
-		initialTime *metav1.Time
-		opts        infra.TimeoutOptions
-	}{
-		{
-			name:        "set timeout on sandbox without existing timeout",
-			initialTime: nil,
-			opts: infra.TimeoutOptions{
-				ShutdownTime: now.Add(30 * time.Minute),
-				PauseTime:    now.Add(15 * time.Minute),
-			},
-		},
-		{
-			name:        "update timeout on sandbox with existing timeout",
-			initialTime: &metav1.Time{Time: now.Add(1 * time.Hour)},
-			opts: infra.TimeoutOptions{
-				ShutdownTime: now.Add(30 * time.Minute),
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sandbox := &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-					Labels: map[string]string{
-						v1alpha1.LabelSandboxIsClaimed: "true",
-					},
-				},
-				Spec: v1alpha1.SandboxSpec{
-					ShutdownTime: tt.initialTime,
-				},
-			}
-
-			cache, fc, err := cachetest.NewTestCache(t)
-			assert.NoError(t, err)
-			require.NoError(t, cache.Run(t.Context()))
-			defer cache.Stop(t.Context())
-			require.NoError(t, fc.Create(t.Context(), sandbox))
-			time.Sleep(20 * time.Millisecond)
-
-			s := AsSandbox(sandbox, cache)
-
-			err = s.SaveTimeout(t.Context(), tt.opts)
-			assert.NoError(t, err)
-
-			var updatedSandbox v1alpha1.Sandbox
-			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, &updatedSandbox))
-			if !tt.opts.PauseTime.IsZero() {
-				assert.NotNil(t, updatedSandbox.Spec.PauseTime)
-				assert.WithinDuration(t, tt.opts.PauseTime, updatedSandbox.Spec.PauseTime.Time, time.Second)
-			}
-			if !tt.opts.ShutdownTime.IsZero() {
-				assert.NotNil(t, updatedSandbox.Spec.ShutdownTime)
-				assert.WithinDuration(t, tt.opts.ShutdownTime, updatedSandbox.Spec.ShutdownTime.Time, time.Second)
-			}
-		})
-	}
-}
-
 func TestSandbox_SetTimeout(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name        string
-		initialTime infra.TimeoutOptions
-		opts        infra.TimeoutOptions
+		initialTime timeout.Options
+		opts        timeout.Options
 	}{
 		{
 			name:        "set timeout on sandbox without existing timeout",
-			initialTime: infra.TimeoutOptions{},
-			opts: infra.TimeoutOptions{
+			initialTime: timeout.Options{},
+			opts: timeout.Options{
 				ShutdownTime: now,
 				PauseTime:    now,
 			},
 		},
 		{
 			name:        "update timeout on sandbox with existing timeout",
-			initialTime: infra.TimeoutOptions{},
-			opts: infra.TimeoutOptions{
+			initialTime: timeout.Options{},
+			opts: timeout.Options{
 				ShutdownTime: now.Add(time.Hour),
 				PauseTime:    now.Add(time.Hour),
 			},
 		},
 		{
 			name: "clear existing timeout",
-			initialTime: infra.TimeoutOptions{
+			initialTime: timeout.Options{
 				ShutdownTime: now,
 				PauseTime:    now,
 			},
-			opts: infra.TimeoutOptions{},
+			opts: timeout.Options{},
 		},
 	}
 
@@ -572,8 +1126,8 @@ func TestSandbox_SetTimeout(t *testing.T) {
 
 			s.SetTimeout(tt.opts)
 
-			assert.WithinDuration(t, tt.opts.ShutdownTime, getTimeFromMetaTime(s.Sandbox.Spec.ShutdownTime), time.Millisecond)
-			assert.WithinDuration(t, tt.opts.PauseTime, getTimeFromMetaTime(s.Sandbox.Spec.PauseTime), time.Millisecond)
+			assert.True(t, timeout.NormalizeTime(tt.opts.ShutdownTime).Equal(timeout.NormalizeTime(getTimeFromMetaTime(s.Sandbox.Spec.ShutdownTime))))
+			assert.True(t, timeout.NormalizeTime(tt.opts.PauseTime).Equal(timeout.NormalizeTime(getTimeFromMetaTime(s.Sandbox.Spec.PauseTime))))
 		})
 	}
 }

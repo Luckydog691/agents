@@ -56,6 +56,7 @@ type CheckpointSpec struct {
 
 	// PersistentContents indicates resume pod with persistent content, Enum: memory, filesystem
 	// +kubebuilder:validation:Optional
+	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
 	// +kubebuilder:validation:Optional
@@ -136,6 +137,8 @@ type CheckpointList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []Checkpoint `json:"items"`
 }
+
+var CheckpointControllerKind = GroupVersion.WithKind("Checkpoint")
 
 func init() {
 	SchemeBuilder.Register(&Checkpoint{}, &CheckpointList{})

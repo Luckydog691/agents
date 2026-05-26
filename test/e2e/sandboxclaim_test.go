@@ -469,7 +469,7 @@ var _ = Describe("SandboxClaim", func() {
 					TemplateName:    qosBreakSet.Name,
 					Replicas:        ptr.To(int32(1)),
 					SkipInitRuntime: true,
-					ClaimTimeout:    &metav1.Duration{Duration: 30 * time.Second},
+					ClaimTimeout:    &metav1.Duration{Duration: 60 * time.Second},
 					WaitReadyTimeout: &metav1.Duration{
 						Duration: 30 * time.Second,
 					},
@@ -2513,6 +2513,93 @@ var _ = Describe("SandboxClaim", func() {
 				Expect(firstGenCount).To(Equal(2), "Should have 2 sandboxes from first claim")
 				Expect(secondGenCount).To(Equal(2), "Should have 2 sandboxes from second claim")
 			})
+		})
+	})
+
+	Context("SkipInitRuntime=false without runtime configured", func() {
+		var (
+			sandboxSet   *agentsv1alpha1.SandboxSet
+			sandboxClaim *agentsv1alpha1.SandboxClaim
+		)
+
+		BeforeEach(func() {
+			// Create a SandboxSet without Runtimes or initContainer containing "runtime"
+			sandboxSet = &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-skip-init-rt-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 2,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:  "test-container",
+										Image: "nginx:stable-alpine3.23",
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxSet)).To(Succeed())
+
+			// Wait for SandboxSet sandboxes to be available
+			Eventually(func() int32 {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxSet.Name,
+					Namespace: sandboxSet.Namespace,
+				}, sandboxSet)
+				return sandboxSet.Status.AvailableReplicas
+			}, time.Minute*2, time.Second).Should(Equal(int32(2)))
+		})
+
+		AfterEach(func() {
+			if sandboxClaim != nil {
+				_ = k8sClient.Delete(ctx, sandboxClaim)
+			}
+			if sandboxSet != nil {
+				_ = k8sClient.Delete(ctx, sandboxSet)
+			}
+		})
+
+		It("should still claim sandbox successfully when no runtime is configured", func() {
+			By("Creating a SandboxClaim with SkipInitRuntime=false")
+			sandboxClaim = &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("test-claim-no-rt-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    sandboxSet.Name,
+					Replicas:        ptr.To(int32(1)),
+					SkipInitRuntime: false,
+				},
+			}
+			Expect(k8sClient.Create(ctx, sandboxClaim)).To(Succeed())
+
+			By("Verifying the claim transitions to Completed phase")
+			Eventually(func() agentsv1alpha1.SandboxClaimPhase {
+				_ = k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandboxClaim.Name,
+					Namespace: sandboxClaim.Namespace,
+				}, sandboxClaim)
+				return sandboxClaim.Status.Phase
+			}, time.Minute, time.Second).Should(Equal(agentsv1alpha1.SandboxClaimPhaseCompleted))
+
+			By("Verifying claimedReplicas equals 1")
+			Expect(sandboxClaim.Status.ClaimedReplicas).To(Equal(int32(1)))
+
+			By("Verifying sandbox is claimed with owner annotation")
+			claimedSandboxes, err := listClaimedSandboxes(ctx, sandboxClaim)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(claimedSandboxes).To(HaveLen(1))
+
+			By("Verifying the claimed sandbox has the correct owner annotation")
+			Expect(claimedSandboxes[0].Annotations[agentsv1alpha1.AnnotationOwner]).To(Equal(string(sandboxClaim.UID)))
 		})
 	})
 })

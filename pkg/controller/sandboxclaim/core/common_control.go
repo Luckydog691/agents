@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
@@ -31,8 +30,10 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/agent-runtime/common"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -41,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	stateutils "github.com/openkruise/agents/pkg/utils/sandboxutils"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 type commonControl struct {
@@ -113,6 +115,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 		c.recorder.Event(claim, "Normal", "ClaimCompleted",
 			fmt.Sprintf("Successfully claimed %d/%d sandboxes", currentCount, desiredReplicas))
 		args.NewStatus.Message = fmt.Sprintf("Completed: %d/%d claimed", currentCount, desiredReplicas)
+		sandboxSetClaimsTotal.WithLabelValues(claim.Namespace, "success").Inc()
 		// Requeue immediately to transition to Completed phase
 		return RequeueImmediately(), nil
 	}
@@ -148,6 +151,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 
 	// Step 10: Record results and determine requeue strategy
 	if claimed > 0 {
+		sandboxset.IncSandboxesClaimedTotal(sandboxSet.Namespace, sandboxSet.Name, claimed)
 		log.Info("Claimed sandboxes in this cycle",
 			"claimed", claimed,
 			"total", finalCount,
@@ -163,6 +167,7 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 		"retryInterval", ClaimRetryInterval)
 	c.recorder.Event(claim, "Warning", "NoAvailableSandboxes",
 		fmt.Sprintf("No available sandboxes in pool %s", sandboxSet.Name))
+	sandboxSetClaimsTotal.WithLabelValues(claim.Namespace, "failed").Inc()
 	// Retry after interval to avoid busy loop
 	return RequeueAfter(ClaimRetryInterval), nil
 }
@@ -196,6 +201,7 @@ func (c *commonControl) EnsureClaimCompleted(ctx context.Context, args ClaimArgs
 				return NoRequeue(), err
 			}
 
+			sandboxClaimExpiredTotal.WithLabelValues(claim.Namespace).Inc()
 			log.Info("SandboxClaim deleted successfully due to TTL expiration")
 			return NoRequeue(), nil
 		}
@@ -278,7 +284,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			}
 			sbx.SetLabels(labels)
 
-			// propagate annotations to podtemplate
+			// propagate labels to podtemplate
 			labels = sbx.GetPodLabels()
 			if labels == nil {
 				labels = make(map[string]string)
@@ -291,7 +297,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 
 			// apply shutdownTime
 			if claim.Spec.ShutdownTime != nil {
-				sbx.SetTimeout(infra.TimeoutOptions{
+				sbx.SetTimeout(timeout.Options{
 					ShutdownTime: claim.Spec.ShutdownTime.Time,
 				})
 			}
@@ -317,9 +323,33 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 
 	if !claim.Spec.SkipInitRuntime {
-		opts.InitRuntime = &config.InitRuntimeOptions{
-			EnvVars:     claim.Spec.EnvVars,
-			AccessToken: uuid.NewString(),
+		hasAgentRuntime := false
+		// Check condition A: Runtimes field contains agent-runtime
+		for _, rt := range sandboxSet.Spec.Runtimes {
+			if rt.Name == agentsv1alpha1.RuntimeConfigForInjectAgentRuntime {
+				hasAgentRuntime = true
+				break
+			}
+		}
+		// Check condition B: initContainer named "runtime"
+		// TODO support sandboxTemplateRef
+		if !hasAgentRuntime && sandboxSet.Spec.Template != nil {
+			for _, c := range sandboxSet.Spec.Template.Spec.InitContainers {
+				if c.Name == common.RuntimeInitContainerName {
+					hasAgentRuntime = true
+					break
+				}
+			}
+		}
+
+		if hasAgentRuntime {
+			opts.InitRuntime = &config.InitRuntimeOptions{
+				EnvVars:     claim.Spec.EnvVars,
+				AccessToken: config.NewDefaultAccessToken(),
+			}
+		} else {
+			logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
+				"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
 		}
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
@@ -361,7 +391,10 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 // countClaimedSandboxes counts sandboxes that are claimed by this claim
 func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim) (int32, error) {
 	log := logf.FromContext(ctx)
-	sandboxes, err := c.cache.ListSandboxWithUser(ctx, string(claim.UID))
+	sandboxes, err := c.cache.ListSandboxes(ctx, cache.ListSandboxesOptions{
+		User:      string(claim.UID),
+		Namespace: claim.Namespace,
+	})
 	if err != nil {
 		return 0, err
 	}

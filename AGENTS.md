@@ -89,6 +89,8 @@ test/              E2E (Go), E2B (Python) tests
 
 ### Testing
 
+- Only run Go tests for packages under `pkg/` via `go test`.
+- Never run any E2E test under the `test/` directory.
 - Table-driven tests with descriptive `name` fields is a must: **ALWAYS** use table-driven tests for consistency and clarity.
 - Reference test methods in same directory for best practices
 - Use shared test helpers
@@ -96,6 +98,19 @@ test/              E2E (Go), E2B (Python) tests
 - Use `expectError string` instead of `expectError bool` to represent expected error state in test cases. An empty
   string means no error is expected; a non-empty string means an error is expected and the actual error message must
   contain that string (verified with `assert.Contains(t, err.Error(), tt.expectError)`).
+
+### Multi-Agent Development Limits
+
+- Core goal: accelerate development as much as possible while still delivering high-quality code.
+- Sub-agents executing a specific task, including implementer and task reviewer agents, must not run all unit tests
+  such as `go test ./pkg/...`.
+- Implementer agents may run unit tests when necessary, such as during TDD or after implementation, but the test scope
+  must stay focused on the changed behavior and must not include unnecessary packages.
+- Reviewer agents must assume unit tests are already passing. They may run unit tests only when the code has an obvious
+  issue that needs verification.
+- Sub-agents must never run `go build`.
+- The main agent, or the final global review agent, may run full package tests sparingly. `go build` must be reserved
+  for final verification after the implementation is considered fully safe.
 
 ## Behavioral Rules
 
@@ -111,3 +126,4 @@ test/              E2E (Go), E2B (Python) tests
 - Ask user when unsure about business logic
 - Always edit the files on your own, never use automation tools or scripts
 - All comments must be in English
+- When creating an `AGENTS.md` for a new submodule, also create a sibling `CLAUDE.md` in the same directory whose sole content is `@./AGENTS.md`

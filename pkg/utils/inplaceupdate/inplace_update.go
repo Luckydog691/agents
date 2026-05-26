@@ -103,9 +103,6 @@ type InPlaceUpdateOptions struct {
 	Box      *agentsv1alpha1.Sandbox
 	Revision string
 	Pod      *corev1.Pod
-	// OnProgress is called after each successful in-place sub-operation
-	// (e.g. metadata/image patch, resource resize).
-	OnProgress func()
 	// for future extensions of pod update behavior
 	ExtensionAnnotations map[string]string
 }
@@ -260,13 +257,20 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 			ResourceVersion: pod.ResourceVersion,
 		},
 		Spec: corev1.PodSpec{
-			Containers: make([]corev1.Container, len(pod.Spec.Containers)),
+			Containers:     make([]corev1.Container, len(pod.Spec.Containers)),
+			InitContainers: make([]corev1.Container, len(pod.Spec.InitContainers)),
 		},
 	}
 	for i := range pod.Spec.Containers {
 		resizeBody.Spec.Containers[i] = corev1.Container{
 			Name:      pod.Spec.Containers[i].Name,
 			Resources: pod.Spec.Containers[i].Resources,
+		}
+	}
+	for i := range pod.Spec.InitContainers {
+		resizeBody.Spec.InitContainers[i] = corev1.Container{
+			Name:      pod.Spec.InitContainers[i].Name,
+			Resources: pod.Spec.InitContainers[i].Resources,
 		}
 	}
 
@@ -277,7 +281,7 @@ func DefaultGenerateResizeSubresourceBody(opts InPlaceUpdateOptions) *corev1.Pod
 		if !ok {
 			continue
 		}
-		if reflect.DeepEqual(origin.Resources, container.Resources) {
+		if resourcesEqual(origin.Resources, container.Resources) {
 			continue
 		}
 		container.Resources = origin.Resources
@@ -422,23 +426,20 @@ func computeQoSClass(pod *corev1.Pod) corev1.PodQOSClass {
 func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOptions) (bool, error) {
 	box, pod, revision := opts.Box, opts.Pod, opts.Revision
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-	progressed := false
 
-	// perform patch
-	patchBody := c.generatePatchBody(opts)
 	current := pod.DeepCopy()
-	if patchBody != "" {
-		if err := c.Patch(ctx, current, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
-			logger.Error(err, "inplace update pod patch failed")
-			return false, err
-		}
-		progressed = true
-		if opts.OnProgress != nil {
-			opts.OnProgress()
-		}
-	}
+	// In-place update involves two sub-operations:
+	//   1. Resource resize  — adjust CPU via the pods/resize subresource.
+	//   2. Metadata/image patch — update container images and the pod-template-hash annotation.
+	//
+	// The pod-template-hash annotation is the authoritative signal that the upgrade has completed.
+	// If we patch first and resize subsequently fails, the hash already indicates "upgraded"
+	// while resources remain at old values — an inconsistent state hard to detect and recover.
+	//
+	// Therefore we MUST perform resize first: only after resources are successfully adjusted
+	// do we apply the metadata/image patch to finalize the upgrade.
 
-	// perform resize
+	// Step 1: perform resize (resource adjustment)
 	resizeBody := c.generateResizeSubresourceBody(InPlaceUpdateOptions{
 		Box:      box,
 		Revision: revision,
@@ -472,10 +473,16 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 			logger.V(5).Info("inplace update pod resize conflict, retrying with latest resourceVersion", "resourceVersion", current.ResourceVersion)
 			return err
 		}); err != nil {
-			return progressed, err
+			return false, err
 		}
-		if opts.OnProgress != nil {
-			opts.OnProgress()
+	}
+
+	// Step 2: perform patch (image + metadata finalization)
+	patchBody := c.generatePatchBody(opts)
+	if patchBody != "" {
+		if err := c.Patch(ctx, current, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
+			logger.Error(err, "inplace update pod patch failed")
+			return false, err
 		}
 	}
 
@@ -586,10 +593,7 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 		if !ok || status.Resources == nil {
 			return false
 		}
-		if !isResourceListCovered(status.Resources.Requests, c.Resources.Requests) {
-			return false
-		}
-		if !isResourceListCovered(status.Resources.Limits, c.Resources.Limits) {
+		if !resourcesEqual(c.Resources, *status.Resources) {
 			return false
 		}
 	}
@@ -635,6 +639,20 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 		return fmt.Errorf("pod resize is deferred (status.resize)")
 	}
 	return nil
+}
+
+// resourcesEqual compares two ResourceRequirements semantically.
+// It only checks resources specified in 'desired' (the sandbox spec), ignoring extra resources
+// in 'actual' (the pod) injected by the system (e.g., ephemeral-storage).
+// It uses Quantity.Cmp() to handle different unit representations (e.g., "1" vs "1000m").
+func resourcesEqual(desired, actual corev1.ResourceRequirements) bool {
+	if !isResourceListCovered(actual.Limits, desired.Limits) {
+		return false
+	}
+	if !isResourceListCovered(actual.Requests, desired.Requests) {
+		return false
+	}
+	return true
 }
 
 func isResourceListCovered(actual, expected corev1.ResourceList) bool {

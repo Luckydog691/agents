@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -24,6 +24,14 @@ type CheckpointListerExpansion interface{}
 // CheckpointNamespaceListerExpansion allows custom methods to be added to
 // CheckpointNamespaceLister.
 type CheckpointNamespaceListerExpansion interface{}
+
+// CommitListerExpansion allows custom methods to be added to
+// CommitLister.
+type CommitListerExpansion interface{}
+
+// CommitNamespaceListerExpansion allows custom methods to be added to
+// CommitNamespaceLister.
+type CommitNamespaceListerExpansion interface{}
 
 // SandboxListerExpansion allows custom methods to be added to
 // SandboxLister.

@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -25,6 +25,8 @@ import (
 type Interface interface {
 	// Checkpoints returns a CheckpointInformer.
 	Checkpoints() CheckpointInformer
+	// Commits returns a CommitInformer.
+	Commits() CommitInformer
 	// Sandboxes returns a SandboxInformer.
 	Sandboxes() SandboxInformer
 	// SandboxClaims returns a SandboxClaimInformer.
@@ -33,8 +35,8 @@ type Interface interface {
 	SandboxSets() SandboxSetInformer
 	// SandboxTemplates returns a SandboxTemplateInformer.
 	SandboxTemplates() SandboxTemplateInformer
-	// SandboxUpdateOpses returns a SandboxUpdateOpsInformer.
-	SandboxUpdateOpses() SandboxUpdateOpsInformer
+	// Sandboxupdateops returns a SandboxUpdateOpsInformer.
+	Sandboxupdateops() SandboxUpdateOpsInformer
 }
 
 type version struct {
@@ -51,6 +53,11 @@ func New(f internalinterfaces.SharedInformerFactory, namespace string, tweakList
 // Checkpoints returns a CheckpointInformer.
 func (v *version) Checkpoints() CheckpointInformer {
 	return &checkpointInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// Commits returns a CommitInformer.
+func (v *version) Commits() CommitInformer {
+	return &commitInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // Sandboxes returns a SandboxInformer.
@@ -73,7 +80,7 @@ func (v *version) SandboxTemplates() SandboxTemplateInformer {
 	return &sandboxTemplateInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
-// SandboxUpdateOpses returns a SandboxUpdateOpsInformer.
-func (v *version) SandboxUpdateOpses() SandboxUpdateOpsInformer {
+// Sandboxupdateops returns a SandboxUpdateOpsInformer.
+func (v *version) Sandboxupdateops() SandboxUpdateOpsInformer {
 	return &sandboxUpdateOpsInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }

@@ -15,7 +15,9 @@ package utils
 
 import (
 	"context"
+	"crypto/md5"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -28,6 +30,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	_ "github.com/openkruise/agents/pkg/features"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func TestSetSandboxCondition(t *testing.T) {
@@ -146,6 +150,11 @@ func TestSetSandboxCondition(t *testing.T) {
 }
 
 func TestTruncateConditionMessage(t *testing.T) {
+	// Ensure default MaxConditionMessageLen is 1024 (no env override in this test).
+	if MaxConditionMessageLen != 1024 {
+		t.Fatalf("expected default MaxConditionMessageLen=1024, got %d", MaxConditionMessageLen)
+	}
+
 	tests := []struct {
 		name     string
 		msg      string
@@ -173,6 +182,64 @@ func TestTruncateConditionMessage(t *testing.T) {
 			got := TruncateConditionMessage(tt.msg)
 			if got != tt.expected {
 				t.Fatalf("TruncateConditionMessage() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTruncateConditionMessage_EnvOverride(t *testing.T) {
+	original := MaxConditionMessageLen
+	defer func() { MaxConditionMessageLen = original }()
+
+	tests := []struct {
+		name     string
+		envVal   string
+		wantLen  int
+	}{
+		{
+			name:    "valid env value",
+			envVal:  "512",
+			wantLen: 512,
+		},
+		{
+			name:    "invalid env value falls back to default",
+			envVal:  "not_a_number",
+			wantLen: 1024,
+		},
+		{
+			name:    "zero env value falls back to default",
+			envVal:  "0",
+			wantLen: 1024,
+		},
+		{
+			name:    "negative env value falls back to default",
+			envVal:  "-1",
+			wantLen: 1024,
+		},
+		{
+			name:    "empty env value falls back to default",
+			envVal:  "",
+			wantLen: 1024,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envVal != "" {
+				t.Setenv("MAX_CONDITION_MESSAGE_LEN", tt.envVal)
+			}
+			MaxConditionMessageLen = getEnvIntOrDefault("MAX_CONDITION_MESSAGE_LEN", 1024)
+
+			if MaxConditionMessageLen != tt.wantLen {
+				t.Fatalf("MaxConditionMessageLen = %d, want %d", MaxConditionMessageLen, tt.wantLen)
+			}
+
+			// Verify truncation works with overridden length
+			longMsg := strings.Repeat("x", tt.wantLen+5)
+			got := TruncateConditionMessage(longMsg)
+			expected := strings.Repeat("x", tt.wantLen) + "..."
+			if got != expected {
+				t.Fatalf("TruncateConditionMessage() len = %d, want %d", len(got), len(expected))
 			}
 		})
 	}
@@ -1140,6 +1207,80 @@ func TestIsLoopbackIP(t *testing.T) {
 			result := IsLoopbackIP(tt.ip)
 			if result != tt.expected {
 				t.Errorf("IsLoopbackIP(%q) = %v, want %v", tt.ip, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGenerateSandboxName(t *testing.T) {
+	// Import features package to register feature gates
+	_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxMultiClusterNaming=false")
+
+	tests := []struct {
+		name                 string
+		featureGateEnabled   bool
+		clusterID            string
+		baseName             string
+		expectedGenerateName string
+	}{
+		{
+			name:                 "feature gate disabled - generateName unchanged",
+			featureGateEnabled:   false,
+			clusterID:            "cluster-east-1",
+			baseName:             "test-sbs",
+			expectedGenerateName: "test-sbs-",
+		},
+		{
+			name:               "feature gate enabled with CLUSTER_ID set",
+			featureGateEnabled: true,
+			clusterID:          "cluster-east-1",
+			baseName:           "test-sbs",
+			expectedGenerateName: fmt.Sprintf("test-sbs-%s-",
+				fmt.Sprintf("%x", md5.Sum([]byte("cluster-east-1")))[:4]),
+		},
+		{
+			name:                 "feature gate enabled but CLUSTER_ID empty - fallback to original",
+			featureGateEnabled:   true,
+			clusterID:            "",
+			baseName:             "test-sbs",
+			expectedGenerateName: "test-sbs-",
+		},
+		{
+			name:               "generateName exceeds 58 chars - truncated",
+			featureGateEnabled: true,
+			clusterID:          "my-cluster",
+			baseName:           strings.Repeat("a", 60),
+			expectedGenerateName: func() string {
+				name := fmt.Sprintf("%s-%s-", strings.Repeat("a", 60),
+					fmt.Sprintf("%x", md5.Sum([]byte("my-cluster")))[:4])
+				if len(name) > 58 {
+					name = name[:58]
+				}
+				return name
+			}(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Set feature gate
+			if tt.featureGateEnabled {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxMultiClusterNaming=true")
+				defer func() { _ = utilfeature.DefaultMutableFeatureGate.Set("SandboxMultiClusterNaming=false") }()
+			} else {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxMultiClusterNaming=false")
+			}
+
+			// Set environment variable
+			if tt.clusterID != "" {
+				t.Setenv("CLUSTER_ID", tt.clusterID)
+			} else {
+				os.Unsetenv("CLUSTER_ID")
+			}
+
+			result := GenerateSandboxName(tt.baseName)
+			if result != tt.expectedGenerateName {
+				t.Errorf("GenerateSandboxName(%q) = %q, want %q", tt.baseName, result, tt.expectedGenerateName)
 			}
 		})
 	}

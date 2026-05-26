@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,10 +50,13 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	pkgutils "github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	utils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	"github.com/openkruise/agents/pkg/utils/sandbox-manager/expectationutils"
@@ -842,7 +847,9 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			}
 			CreateSandboxWithStatus(t, fc, sbx)
 
-			gotSbx, err := testInfra.Cache.GetClaimedSandbox(t.Context(), sandboxutils.GetSandboxID(sbx))
+			gotSbx, err := testInfra.Cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{
+				SandboxID: sandboxutils.GetSandboxID(sbx),
+			})
 			assert.NoError(t, err)
 			if err != nil {
 				return
@@ -855,6 +862,116 @@ func TestCheckSandboxInplaceUpdate(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
+		})
+	}
+}
+
+func TestSandboxReadyFailureMessage(t *testing.T) {
+	tests := []struct {
+		name string
+		sbx  *v1alpha1.Sandbox
+		want string
+	}{
+		{
+			name: "controller has not observed latest generation",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 4,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 3,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=controller has not observed latest generation, state=running, ready=PodReady, generation=3/4",
+		},
+		{
+			name: "inplace update is still in progress",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+						{
+							Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
+							Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=inplace update is still in progress, state=running, ready=PodReady, inplaceUpdate=InplaceUpdating",
+		},
+		{
+			name: "sandbox has no pod ip",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(v1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: v1alpha1.SandboxReadyReasonPodReady,
+						},
+					},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=sandbox has no pod IP, state=running, ready=PodReady",
+		},
+		{
+			name: "ready condition reports failure with message",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Reason:  v1alpha1.SandboxReadyReasonStartContainerFailed,
+							Message: "process exited",
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports StartContainerFailed: process exited, state=dead, ready=StartContainerFailed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sandboxReadyFailureMessage(tt.sbx))
 		})
 	}
 }
@@ -1795,7 +1912,7 @@ func TestNewSandboxFromTemplate_RateLimitExceeded(t *testing.T) {
 
 	// Wait for cache to sync
 	require.Eventually(t, func() bool {
-		_, err := infraInstance.Cache.PickSandboxSet(t.Context(), template)
+		_, err := infraInstance.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: template})
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
@@ -1943,6 +2060,172 @@ func TestModifyPickedSandbox_CSIMount(t *testing.T) {
 	}
 }
 
+func TestRecordSecurityTokenRefreshStatus(t *testing.T) {
+	tests := []struct {
+		name             string
+		opts             infra.ClaimSandboxOptions
+		expectedAnnos    map[string]string
+		notExpectedAnnos []string
+	}{
+		{
+			name: "with security token and expiration",
+			opts: infra.ClaimSandboxOptions{
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{
+						AccessToken:           "security-access-token",
+						AccessTokenExpiration: "2026-12-31T23:59:59Z",
+					},
+				},
+			},
+			expectedAnnos: map[string]string{
+				pkgutils.AgentKeyTokenRefreshStatus: `{"accessTokenExpiration":"2026-12-31T23:59:59Z"}`,
+			},
+		},
+		{
+			name: "with security token without expiration",
+			opts: infra.ClaimSandboxOptions{
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{
+						AccessToken: "at-456",
+					},
+				},
+			},
+			expectedAnnos: map[string]string{
+				// AccessTokenExpiration is omitempty, so empty value produces "{}"
+				pkgutils.AgentKeyTokenRefreshStatus: `{}`,
+			},
+		},
+		{
+			name: "without security token",
+			opts: infra.ClaimSandboxOptions{
+				SecurityToken: nil,
+			},
+			notExpectedAnnos: []string{
+				pkgutils.AgentKeyTokenRefreshStatus,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: make(map[string]string),
+					},
+				},
+			}
+
+			err := recordSecurityTokenRefreshStatus(sbx, tt.opts)
+			require.NoError(t, err)
+
+			annotations := sbx.GetAnnotations()
+
+			// Check expected annotations with exact value match
+			for key, expectedValue := range tt.expectedAnnos {
+				assert.Equal(t, expectedValue, annotations[key], "annotation %s should match", key)
+			}
+
+			// Check not expected annotations
+			for _, key := range tt.notExpectedAnnos {
+				assert.Empty(t, annotations[key], "annotation %s should not be set", key)
+			}
+
+			// For the "with expiration" case, verify JSON round-trip
+			if tt.name == "with security token and expiration" {
+				raw := annotations[pkgutils.AgentKeyTokenRefreshStatus]
+				require.NotEmpty(t, raw)
+				var decoded identity.TokenRefreshStatus
+				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
+				assert.Equal(t, "2026-12-31T23:59:59Z", decoded.AccessTokenExpiration)
+			}
+		})
+	}
+}
+
+func TestRecordSecurityTokenRefreshStatus_NilAnnotations(t *testing.T) {
+	tests := []struct {
+		name          string
+		initialAnnos  map[string]string
+		opts          infra.ClaimSandboxOptions
+		expectedValue string
+	}{
+		{
+			name:         "nil annotations map is created",
+			initialAnnos: nil,
+			opts: infra.ClaimSandboxOptions{
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{
+						AccessToken:           "token-1",
+						AccessTokenExpiration: "2026-06-01T00:00:00Z",
+					},
+				},
+			},
+			expectedValue: `{"accessTokenExpiration":"2026-06-01T00:00:00Z"}`,
+		},
+		{
+			name: "existing annotations are preserved",
+			initialAnnos: map[string]string{
+				"existing-key": "existing-value",
+			},
+			opts: infra.ClaimSandboxOptions{
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{
+						AccessToken:           "token-2",
+						AccessTokenExpiration: "2026-07-01T00:00:00Z",
+					},
+				},
+			},
+			expectedValue: `{"accessTokenExpiration":"2026-07-01T00:00:00Z"}`,
+		},
+		{
+			name:         "nil security token is no-op with nil annotations",
+			initialAnnos: nil,
+			opts: infra.ClaimSandboxOptions{
+				SecurityToken: nil,
+			},
+			expectedValue: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "test-sandbox",
+						Namespace:   "default",
+						Annotations: tt.initialAnnos,
+					},
+				},
+			}
+
+			err := recordSecurityTokenRefreshStatus(sbx, tt.opts)
+			require.NoError(t, err)
+
+			annotations := sbx.GetAnnotations()
+
+			if tt.expectedValue != "" {
+				assert.Equal(t, tt.expectedValue, annotations[pkgutils.AgentKeyTokenRefreshStatus])
+			} else {
+				// When SecurityToken is nil, annotations should remain unchanged
+				if tt.initialAnnos == nil {
+					assert.Nil(t, annotations)
+				}
+			}
+
+			// Verify existing annotations are preserved
+			if tt.initialAnnos != nil {
+				for k, v := range tt.initialAnnos {
+					assert.Equal(t, v, annotations[k], "existing annotation %s should be preserved", k)
+				}
+			}
+		})
+	}
+}
+
 // TestTryClaimSandbox_LockConflict tests the error handling in TryClaimSandbox when
 // performLockSandbox fails (claim.go lines 168-179). It verifies:
 // - Conflict error: ResourceVersionExpectation is set and a retriableError is returned.
@@ -1986,7 +2269,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			// Build scheme
 			scheme := k8sruntime.NewScheme()
 			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-			utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 			// Build fake client with custom Update interceptor that returns the specified error for Sandbox updates.
 			// This simulates a conflict (or other error) during the lock step without affecting Create or Status updates.
@@ -1996,8 +2279,8 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 				builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 			}
 			builder = builder.WithStatusSubresource(
-				&agentsv1alpha1.Sandbox{},
-				&agentsv1alpha1.SandboxSet{},
+				&v1alpha1.Sandbox{},
+				&v1alpha1.SandboxSet{},
 			)
 			builder = builder.WithInterceptorFuncs(interceptor.Funcs{
 				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
@@ -2040,8 +2323,8 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 					Namespace: "default",
 					UID:       types.UID(uuid.NewString()),
 					Labels: map[string]string{
-						v1alpha1.LabelSandboxTemplate:        existTemplate,
-						agentsv1alpha1.LabelSandboxIsClaimed: "false",
+						v1alpha1.LabelSandboxTemplate:  existTemplate,
+						v1alpha1.LabelSandboxIsClaimed: "false",
 					},
 					CreationTimestamp: metav1.Now(),
 					Annotations:       map[string]string{},
@@ -2119,6 +2402,427 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 
 			// Clean up expectation state
 			expectationutils.ResourceVersionExpectationDelete(sbx)
+		})
+	}
+}
+
+//goland:noinspection GoDeprecation
+func TestInfraClaimSandboxReturnsErrorWhenLockContextCanceled(t *testing.T) {
+	utils.InitLogOutput()
+	existTemplate := "test-template"
+	user := "test-user"
+
+	tests := []struct {
+		name        string
+		lockError   error
+		expectError string
+	}{
+		{
+			name: "context canceled during sandbox lock",
+			lockError: &url.Error{
+				Op:  "Put",
+				URL: "https://apiserver.example/apis/agents.kruise.io/v1alpha1/namespaces/default/sandboxes/test-sbx",
+				Err: context.Canceled,
+			},
+			expectError: "context canceled",
+		},
+		{
+			name:        "context canceled returned directly",
+			lockError:   context.Canceled,
+			expectError: "context canceled",
+		},
+		{
+			name: "context deadline exceeded during sandbox lock",
+			lockError: &url.Error{
+				Op:  "Put",
+				URL: "https://apiserver.example/apis/agents.kruise.io/v1alpha1/namespaces/default/sandboxes/test-sbx",
+				Err: context.DeadlineExceeded,
+			},
+			expectError: "context deadline exceeded",
+		},
+		{
+			name:        "context deadline exceeded returned directly",
+			lockError:   context.DeadlineExceeded,
+			expectError: "context deadline exceeded",
+		},
+		{
+			name:        "wait timeout returned directly",
+			lockError:   wait.ErrorInterrupted(fmt.Errorf("wait interrupted by test")),
+			expectError: "wait interrupted by test",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
+				DisableRouteReconciliation: true,
+			})
+
+			origCreateSandbox := DefaultCreateSandbox
+			DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+				return nil, tt.lockError
+			}
+			t.Cleanup(func() {
+				DefaultCreateSandbox = origCreateSandbox
+			})
+
+			sbs := &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      existTemplate,
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+							},
+						},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), sbs))
+
+			got, metrics, err := testInfra.ClaimSandbox(t.Context(), infra.ClaimSandboxOptions{
+				User:            user,
+				Template:        existTemplate,
+				CreateOnNoStock: true,
+				ClaimTimeout:    100 * time.Millisecond,
+			})
+
+			require.Nil(t, got)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			require.NotNil(t, metrics.LastError)
+			assert.Contains(t, metrics.LastError.Error(), tt.expectError)
+		})
+	}
+}
+
+func TestBuildClaimErrorWithPickSandboxFailures(t *testing.T) {
+	tests := []struct {
+		name        string
+		err         error
+		lastError   error
+		failures    []infra.PickSandboxFailure
+		expectError string
+		expectJSON  []infra.PickSandboxFailure
+	}{
+		{
+			name: "nil error returns nil",
+		},
+		{
+			name:        "without failures keeps old message",
+			err:         errors.New("timed out waiting for the condition"),
+			lastError:   errors.New("no available sandboxes"),
+			expectError: "timed out waiting for the condition, last error: no available sandboxes",
+		},
+		{
+			name:      "with failures appends json suffix",
+			err:       errors.New("timed out waiting for the condition"),
+			lastError: errors.New("failed to init runtime"),
+			failures: []infra.PickSandboxFailure{
+				{Key: "default/sbx-1", Reason: "failed to init runtime", Count: 2},
+				{Key: "", Reason: "no available sandboxes", Count: 3},
+			},
+			expectError: "pick sandbox failures: ",
+			expectJSON: []infra.PickSandboxFailure{
+				{Key: "default/sbx-1", Reason: "failed to init runtime", Count: 2},
+				{Key: "", Reason: "no available sandboxes", Count: 3},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := buildClaimError(tt.err, tt.lastError, tt.failures)
+			if tt.err == nil {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			if tt.expectJSON == nil {
+				assert.NotContains(t, err.Error(), "pick sandbox failures:")
+				return
+			}
+			parts := strings.Split(err.Error(), "pick sandbox failures: ")
+			require.Len(t, parts, 2)
+			var got []infra.PickSandboxFailure
+			require.NoError(t, json.Unmarshal([]byte(parts[1]), &got))
+			assert.Equal(t, tt.expectJSON, got)
+		})
+	}
+}
+
+func TestTryClaimSandboxRecordsPickSandboxFailures(t *testing.T) {
+	utils.InitLogOutput()
+	existTemplate := "test-template"
+
+	tests := []struct {
+		name      string
+		options   infra.ClaimSandboxOptions
+		setup     func(t *testing.T, fc client.Client)
+		want      []infra.PickSandboxFailure
+		wantError string
+	}{
+		{
+			name: "records no pick failure with empty key",
+			options: infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: existTemplate,
+			},
+			want: []infra.PickSandboxFailure{
+				{Key: "", Reason: "no available sandboxes for template test-template (no stock)", Count: 1},
+			},
+			wantError: "no stock",
+		},
+		{
+			name: "records picked sandbox key after wait ready failure",
+			options: infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: existTemplate,
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Image: "new-image",
+				},
+			},
+			setup: func(t *testing.T, fc client.Client) {
+				createAvailableSandboxForFailureRecord(t, fc, existTemplate, func(sbx *v1alpha1.Sandbox) {
+					sbx.Status.Conditions = []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Status:  metav1.ConditionTrue,
+							Reason:  v1alpha1.SandboxReadyReasonStartContainerFailed,
+							Message: "by test",
+						},
+					}
+				})
+			},
+			want: []infra.PickSandboxFailure{
+				{Key: "default/test-sbx", Reason: "failed to wait for sandbox ready: sandbox start container failed: by test", Count: 1},
+			},
+			wantError: "sandbox start container failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t)
+			if tt.setup != nil {
+				tt.setup(t, fc)
+			}
+			opts, err := ValidateAndInitClaimOptions(tt.options)
+			require.NoError(t, err)
+
+			_, metrics, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantError)
+			assert.Equal(t, tt.want, metrics.PickSandboxFailures)
+		})
+	}
+}
+
+func createAvailableSandboxForFailureRecord(t *testing.T, fc client.Client, template string, mutate func(sbx *v1alpha1.Sandbox)) {
+	t.Helper()
+	sbx := &v1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sbx",
+			Namespace: "default",
+			Labels: map[string]string{
+				v1alpha1.LabelSandboxTemplate:        template,
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			Annotations:       map[string]string{},
+			OwnerReferences:   GetSbsOwnerReference(),
+			CreationTimestamp: metav1.Now(),
+		},
+		Spec: v1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "old-image"}},
+					},
+				},
+			},
+		},
+		Status: v1alpha1.SandboxStatus{
+			Phase: v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(v1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+				},
+			},
+			PodInfo: v1alpha1.PodInfo{
+				PodIP: "1.2.3.4",
+			},
+		},
+	}
+	if mutate != nil {
+		mutate(sbx)
+	}
+	CreateSandboxWithStatus(t, fc, sbx)
+	require.Eventually(t, func() bool {
+		var got v1alpha1.Sandbox
+		return fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &got) == nil
+	}, 100*time.Millisecond, 5*time.Millisecond)
+}
+
+func TestInfraClaimSandboxAggregatesPickSandboxFailuresInError(t *testing.T) {
+	utils.InitLogOutput()
+	tests := []struct {
+		name        string
+		options     infra.ClaimSandboxOptions
+		expectKey   string
+		expectError string
+	}{
+		{
+			name: "aggregates repeated no stock retries",
+			options: infra.ClaimSandboxOptions{
+				User:         "test-user",
+				Template:     "test-template",
+				ClaimTimeout: 100 * time.Millisecond,
+			},
+			expectKey:   "",
+			expectError: "no stock",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, _ := NewTestInfra(t)
+			_, metrics, err := testInfra.ClaimSandbox(t.Context(), tt.options)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Len(t, metrics.PickSandboxFailures, 1)
+			assert.Equal(t, tt.expectKey, metrics.PickSandboxFailures[0].Key)
+			assert.Greater(t, metrics.PickSandboxFailures[0].Count, 1)
+
+			parts := strings.Split(err.Error(), "pick sandbox failures: ")
+			require.Len(t, parts, 2)
+			var got []infra.PickSandboxFailure
+			require.NoError(t, json.Unmarshal([]byte(parts[1]), &got))
+			require.Len(t, got, 1)
+			assert.Equal(t, metrics.PickSandboxFailures[0], got[0])
+		})
+	}
+}
+
+func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
+	tests := []struct {
+		name      string
+		setup     func(t *testing.T, c client.Client)
+		options   infra.ClaimSandboxOptions
+		postCheck func(t *testing.T, sbx infra.Sandbox)
+	}{
+		{
+			name: "claims available sandbox only from requested namespace",
+			setup: func(t *testing.T, c client.Client) {
+				now := metav1.Now()
+				for _, namespace := range []string{"team-a", "team-b"} {
+					sbx := &v1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:              namespace + "-sandbox",
+							Namespace:         namespace,
+							CreationTimestamp: now,
+							Labels: map[string]string{
+								v1alpha1.LabelSandboxTemplate:        "shared-template",
+								agentsv1alpha1.LabelSandboxIsClaimed: "false",
+							},
+							Annotations:     map[string]string{},
+							OwnerReferences: GetSbsOwnerReference(),
+						},
+						Spec: v1alpha1.SandboxSpec{
+							EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+								Template: &corev1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{Name: "main", Image: "old-image"}},
+									},
+								},
+							},
+						},
+						Status: v1alpha1.SandboxStatus{
+							Phase:      v1alpha1.SandboxRunning,
+							Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+							PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+						},
+					}
+					CreateSandboxWithStatus(t, c, sbx)
+				}
+			},
+			options: infra.ClaimSandboxOptions{
+				Namespace:    "team-a",
+				User:         "test-user",
+				Template:     "shared-template",
+				ClaimTimeout: 100 * time.Millisecond,
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "team-a", sbx.GetNamespace())
+				assert.Equal(t, "team-a-sandbox", sbx.GetName())
+			},
+		},
+		{
+			name: "create on no stock creates sandbox in requested namespace",
+			setup: func(t *testing.T, c client.Client) {
+				for _, namespace := range []string{"team-a", "team-b"} {
+					sbs := &v1alpha1.SandboxSet{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "shared-template",
+							Namespace: namespace,
+						},
+						Spec: v1alpha1.SandboxSetSpec{
+							EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+								Template: &corev1.PodTemplateSpec{
+									Spec: corev1.PodSpec{
+										Containers: []corev1.Container{{Name: "main", Image: namespace + "-image"}},
+									},
+								},
+							},
+						},
+					}
+					require.NoError(t, c.Create(t.Context(), sbs))
+				}
+			},
+			options: infra.ClaimSandboxOptions{
+				Namespace:       "team-b",
+				User:            "test-user",
+				Template:        "shared-template",
+				CreateOnNoStock: true,
+				ClaimTimeout:    500 * time.Millisecond,
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "team-b", sbx.GetNamespace())
+				assert.Equal(t, "team-b-image", sbx.GetImage())
+			},
+		},
+	}
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:      v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		require.NoError(t, c.Status().Update(ctx, created))
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t)
+			tt.setup(t, fc)
+			sbx, _, err := testInfra.ClaimSandbox(t.Context(), tt.options)
+			require.NoError(t, err)
+			tt.postCheck(t, sbx)
 		})
 	}
 }
@@ -2205,7 +2909,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			require.NoError(t, err)
 			err = c.Status().Update(t.Context(), sbs)
 			require.NoError(t, err)
-			require.True(t, testInfra.HasTemplate(t.Context(), template))
+			require.True(t, testInfra.HasTemplate(t.Context(), infra.HasTemplateOptions{Name: template}))
 
 			now := metav1.Now()
 			ownerRefs := []metav1.OwnerReference{*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind)}
@@ -2255,7 +2959,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 			// Wait for cache sync
 			totalSandboxes := tt.matchingCount + tt.nonMatchingCount
 			require.Eventually(t, func() bool {
-				objs, err := testInfra.Cache.ListSandboxesInPool(t.Context(), template)
+				objs, err := testInfra.Cache.ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{Pool: template})
 				return err == nil && len(objs) >= totalSandboxes
 			}, 200*time.Millisecond, 5*time.Millisecond)
 
@@ -2365,6 +3069,375 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 			// Check not expected annotations
 			for _, key := range tt.notExpectedAnnos {
 				assert.Empty(t, annotations[key], "annotation %s should not be set", key)
+			}
+		})
+	}
+}
+
+// TestNewSandboxFromSandboxSet_TemplateRef covers the SandboxTemplate
+// resolution branch in newSandboxFromSandboxSet: when the SandboxSet uses
+// spec.templateRef, the referenced SandboxTemplate must be fetched from the
+// cache and its pod template labels/annotations propagated to the new
+// Sandbox; if the SandboxTemplate cannot be resolved the function must
+// return a NoAvailable error rather than panicking.
+func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
+	utils.InitLogOutput()
+
+	const templateName = "ref-sbs"
+	const refName = "my-sbt"
+
+	tests := []struct {
+		name       string
+		createSBT  bool
+		wantErr    string
+		wantLabels map[string]string
+		wantAnnos  map[string]string
+	}{
+		{
+			name:      "templateRef resolved and labels inherited",
+			createSBT: true,
+			wantLabels: map[string]string{
+				"app":                          "from-sbt",
+				v1alpha1.LabelSandboxTemplate:  refName,
+				v1alpha1.LabelSandboxPool:      templateName,
+				v1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			wantAnnos: map[string]string{
+				"source":                           "sbt",
+				v1alpha1.SandboxAnnotationPriority: "100",
+			},
+		},
+		{
+			name:      "templateRef not found returns NoAvailable error",
+			createSBT: false,
+			wantErr:   "cannot resolve sandbox template",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+			defer infraInstance.Stop(t.Context())
+
+			// SandboxSet that references the external SandboxTemplate.
+			sbs := &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      templateName,
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: refName},
+					},
+				},
+			}
+			require.NoError(t, fc.Create(t.Context(), sbs))
+
+			if tt.createSBT {
+				sbt := &v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: refName, Namespace: "default"},
+					Spec: v1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels:      map[string]string{"app": "from-sbt"},
+								Annotations: map[string]string{"source": "sbt"},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "img:v1"}},
+							},
+						},
+					},
+				}
+				require.NoError(t, fc.Create(t.Context(), sbt))
+			}
+
+			// Wait for the SandboxSet to be visible through the cache so
+			// PickSandboxSet can find it.
+			require.Eventually(t, func() bool {
+				_, err := infraInstance.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: templateName})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			if tt.createSBT {
+				// Also wait for the SandboxTemplate to be visible.
+				require.Eventually(t, func() bool {
+					got := &v1alpha1.SandboxTemplate{}
+					return infraInstance.Cache.GetClient().Get(t.Context(),
+						client.ObjectKey{Namespace: "default", Name: refName}, got) == nil
+				}, time.Second, 10*time.Millisecond)
+			}
+
+			opts := infra.ClaimSandboxOptions{
+				Template: templateName,
+				User:     "test-user",
+			}
+			sbx, _, err := newSandboxFromSandboxSet(t.Context(), opts, infraInstance.Cache, nil)
+
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Nil(t, sbx)
+				return
+			}
+
+			require.NoError(t, err)
+			require.NotNil(t, sbx)
+			for k, v := range tt.wantLabels {
+				assert.Equal(t, v, sbx.GetLabels()[k], "label %s mismatch", k)
+			}
+			for k, v := range tt.wantAnnos {
+				assert.Equal(t, v, sbx.GetAnnotations()[k], "annotation %s mismatch", k)
+			}
+			// templateRef must be carried over to the Sandbox spec.
+			require.NotNil(t, sbx.Spec.TemplateRef)
+			assert.Equal(t, refName, sbx.Spec.TemplateRef.Name)
+		})
+	}
+}
+
+// mockIdentityProvider is a configurable mock for testing TryClaimSandbox security token flows.
+type mockIdentityProvider struct {
+	issueTokenFunc func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error)
+	propagateFunc  func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error
+}
+
+func (m *mockIdentityProvider) IssueToken(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+	if m.issueTokenFunc != nil {
+		return m.issueTokenFunc(ctx, req)
+	}
+	return &identity.TokenResponse{AccessToken: uuid.NewString()}, nil
+}
+
+func (m *mockIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+	if m.propagateFunc != nil {
+		return m.propagateFunc(ctx, sbx, tokenResp)
+	}
+	return nil
+}
+
+//goland:noinspection GoDeprecation
+func TestTryClaimSandbox_SecurityToken(t *testing.T) {
+	utils.InitLogOutput()
+
+	// Enable SecurityIdentityProviderGate for all sub-tests
+	require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=true"))
+	t.Cleanup(func() {
+		require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set("SecurityIdentityProvider=false"))
+	})
+
+	existTemplate := "test-template"
+	user := "test-user"
+
+	tests := []struct {
+		name         string
+		options      infra.ClaimSandboxOptions
+		mockProvider *mockIdentityProvider
+		preModifier  func(sbx *v1alpha1.Sandbox)
+		expectError  string
+		postCheck    func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics)
+	}{
+		{
+			name: "issue security token success and propagate",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{
+					AccessToken: "original-uuid-token",
+				},
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
+				},
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+					return &identity.TokenResponse{AccessToken: "secure-token-123"}, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					return nil
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
+				annotations := sbx.GetAnnotations()
+				// Original UUID token is written via InitRuntime
+				assert.Equal(t, "original-uuid-token", annotations[v1alpha1.AnnotationRuntimeAccessToken])
+				// SecurityToken metrics should be recorded
+				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+				// TokenRefreshStatus annotation should be set
+				raw := annotations[pkgutils.AgentKeyTokenRefreshStatus]
+				assert.NotEmpty(t, raw)
+				var decoded identity.TokenRefreshStatus
+				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
+			},
+		},
+		{
+			name: "issue security token failure falls back to UUID transparently",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{
+					AccessToken: "original-uuid-token",
+				},
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
+				},
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+					return nil, fmt.Errorf("identity provider unavailable")
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
+				// Fallback generates a UUID token automatically, so claim succeeds
+				annotations := sbx.GetAnnotations()
+				assert.Equal(t, "original-uuid-token", annotations[v1alpha1.AnnotationRuntimeAccessToken])
+				// TokenRefreshStatus IS set because fallback issuance succeeded
+				raw := annotations[pkgutils.AgentKeyTokenRefreshStatus]
+				assert.NotEmpty(t, raw)
+				var decoded identity.TokenRefreshStatus
+				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
+				// SecurityToken metrics should be recorded
+				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+			},
+		},
+		{
+			name: "propagate security token failure returns retriable error",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{
+					AccessToken: "original-uuid-token",
+				},
+				SecurityToken: &config.SecurityTokenOptions{
+					TokenResponse: identity.TokenResponse{AccessToken: "placeholder"},
+				},
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+					return &identity.TokenResponse{AccessToken: "secure-token-456"}, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					return fmt.Errorf("propagation failed")
+				},
+			},
+			expectError: "security token propagation failed",
+		},
+		{
+			name: "security token is issued even when access token is not UUID",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{
+					AccessToken: "some-token",
+				},
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
+				annotations := sbx.GetAnnotations()
+				// TokenRefreshStatus should be set since issuance succeeded
+				assert.NotEmpty(t, annotations[pkgutils.AgentKeyTokenRefreshStatus])
+				// SecurityToken metric should be recorded
+				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+			},
+		},
+		{
+			name: "security token is issued even when InitRuntime is nil",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, req identity.TokenRequest) (*identity.TokenResponse, error) {
+					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
+				annotations := sbx.GetAnnotations()
+				// TokenRefreshStatus should be set since issuance succeeded
+				assert.NotEmpty(t, annotations[pkgutils.AgentKeyTokenRefreshStatus])
+				// SecurityToken metric should be recorded
+				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup runtime server for InitRuntime
+			server := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
+				RunCommandImmediately: true,
+			})
+			defer server.Close()
+
+			// Save and restore the registered provider
+			identity.RegisterProvider(tt.mockProvider)
+			t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
+
+			tt.options.ClaimTimeout = 500 * time.Millisecond
+			testInfra, fc := NewTestInfra(t)
+
+			// Create an available sandbox
+			sbx := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx",
+					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxTemplate:        existTemplate,
+						agentsv1alpha1.LabelSandboxIsClaimed: "false",
+					},
+					CreationTimestamp: metav1.Now(),
+					Annotations: map[string]string{
+						v1alpha1.AnnotationRuntimeURL: server.URL,
+					},
+					OwnerReferences: GetSbsOwnerReference(),
+				},
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+							},
+						},
+					},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			}
+			if tt.preModifier != nil {
+				tt.preModifier(sbx)
+			}
+			CreateSandboxWithStatus(t, fc, sbx)
+			require.Eventually(t, func() bool {
+				var got v1alpha1.Sandbox
+				return fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &got) == nil
+			}, 100*time.Millisecond, 5*time.Millisecond)
+
+			opts, err := ValidateAndInitClaimOptions(tt.options)
+			require.NoError(t, err)
+
+			claimed, metrics, claimErr := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+
+			if tt.expectError != "" {
+				require.Error(t, claimErr)
+				assert.Contains(t, claimErr.Error(), tt.expectError)
+				var retryErr retriableError
+				assert.True(t, errors.As(claimErr, &retryErr), "error should be a retriableError")
+			} else {
+				require.NoError(t, claimErr)
+				require.NotNil(t, claimed)
+			}
+
+			if tt.postCheck != nil {
+				tt.postCheck(t, claimed, metrics)
 			}
 		})
 	}

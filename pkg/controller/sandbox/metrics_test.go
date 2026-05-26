@@ -17,6 +17,7 @@ limitations under the License.
 package sandbox
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -274,10 +275,14 @@ func TestRecordSandboxMetrics_InplaceUpdateConditionFalse(t *testing.T) {
 	recordSandboxMetrics(sandbox)
 	defer deleteSandboxMetrics("default", "inplace-sandbox")
 
-	// InplaceUpdate=False: inplace_update_done should be 0
-	val := testutil.ToFloat64(sandboxStatusInplaceUpdateDone.WithLabelValues("default", "inplace-sandbox"))
-	if val != 0 {
-		t.Errorf("sandbox_status_inplace_update_done = %v, want 0", val)
+	// InplaceUpdate=False: inplace_updating should be 1 (negative semantics)
+	val := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues("default", "inplace-sandbox"))
+	if val != 1 {
+		t.Errorf("sandbox_status_inplace_updating = %v, want 1", val)
+	}
+	valTime := testutil.ToFloat64(sandboxStatusInplaceUpdatingTime.WithLabelValues("default", "inplace-sandbox"))
+	if valTime == 0 {
+		t.Errorf("sandbox_status_inplace_updating_time should be set when condition is False")
 	}
 }
 
@@ -304,14 +309,10 @@ func TestRecordSandboxMetrics_InplaceUpdateConditionTrue(t *testing.T) {
 	recordSandboxMetrics(sandbox)
 	defer deleteSandboxMetrics("default", "inplace-true-sandbox")
 
-	// Verify inplace_update_done metrics
-	doneVal := testutil.ToFloat64(sandboxStatusInplaceUpdateDone.WithLabelValues("default", "inplace-true-sandbox"))
-	if doneVal != 1 {
-		t.Errorf("sandbox_status_inplace_update_done = %v, want 1", doneVal)
-	}
-	doneTime := testutil.ToFloat64(sandboxStatusInplaceUpdateDoneTime.WithLabelValues("default", "inplace-true-sandbox"))
-	if doneTime != float64(now.Unix()) {
-		t.Errorf("sandbox_status_inplace_update_done_time = %v, want %v", doneTime, float64(now.Unix()))
+	// Verify inplace_updating metrics (True → updating=0)
+	doneVal := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues("default", "inplace-true-sandbox"))
+	if doneVal != 0 {
+		t.Errorf("sandbox_status_inplace_updating = %v, want 0", doneVal)
 	}
 }
 
@@ -363,10 +364,10 @@ func TestRecordSandboxMetrics_PausedConditionTrue(t *testing.T) {
 	recordSandboxMetrics(sandbox)
 	defer deleteSandboxMetrics("default", "paused-true-sandbox")
 
-	// Verify paused_time timestamp is recorded
-	pausedTime := testutil.ToFloat64(sandboxStatusPausedTime.WithLabelValues("default", "paused-true-sandbox"))
-	if pausedTime != float64(now.Unix()) {
-		t.Errorf("sandbox_status_paused_time = %v, want %v", pausedTime, float64(now.Unix()))
+	// Paused=True → unpaused=0, unpaused_time should NOT be set
+	unpausedVal := testutil.ToFloat64(sandboxStatusUnpaused.WithLabelValues("default", "paused-true-sandbox"))
+	if unpausedVal != 0 {
+		t.Errorf("sandbox_status_unpaused = %v, want 0", unpausedVal)
 	}
 }
 
@@ -418,10 +419,10 @@ func TestRecordSandboxMetrics_ResumedConditionTrue(t *testing.T) {
 	recordSandboxMetrics(sandbox)
 	defer deleteSandboxMetrics("default", "resumed-true-sandbox")
 
-	// Verify resumed_time timestamp is recorded
-	resumedTime := testutil.ToFloat64(sandboxStatusResumedTime.WithLabelValues("default", "resumed-true-sandbox"))
-	if resumedTime != float64(now.Unix()) {
-		t.Errorf("sandbox_status_resumed_time = %v, want %v", resumedTime, float64(now.Unix()))
+	// Resumed=True → unresumed=0, unresumed_time should NOT be set
+	unresumedVal := testutil.ToFloat64(sandboxStatusUnresumed.WithLabelValues("default", "resumed-true-sandbox"))
+	if unresumedVal != 0 {
+		t.Errorf("sandbox_status_unresumed = %v, want 0", unresumedVal)
 	}
 }
 
@@ -458,10 +459,10 @@ func TestRecordSandboxMetrics_MultipleConditions(t *testing.T) {
 		t.Errorf("sandbox_status_ready = %v, want 1", readyVal)
 	}
 
-	// InplaceUpdate=False: inplace_update_done should be 0
-	inplaceVal := testutil.ToFloat64(sandboxStatusInplaceUpdateDone.WithLabelValues("default", "multi-cond-sandbox"))
-	if inplaceVal != 0 {
-		t.Errorf("sandbox_status_inplace_update_done = %v, want 0", inplaceVal)
+	// InplaceUpdate=False: inplace_updating should be 1 (negative semantics)
+	inplaceVal := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues("default", "multi-cond-sandbox"))
+	if inplaceVal != 1 {
+		t.Errorf("sandbox_status_inplace_updating = %v, want 1", inplaceVal)
 	}
 }
 
@@ -534,10 +535,10 @@ func TestRecordSandboxMetrics_Info(t *testing.T) {
 			NodeName: "node-1",
 		},
 	}
-	
+
 	recordSandboxMetrics(sandbox)
 	defer deleteSandboxMetrics("default", "info-sandbox")
-	
+
 	val := testutil.ToFloat64(sandboxInfo.WithLabelValues("default", "info-sandbox",
 		"my-sandboxset", "node-1", "my-template"))
 	if val != 1 {
@@ -583,8 +584,8 @@ func TestRecordSandboxMetrics_PausedConditionTrueTimestamp(t *testing.T) {
 		status       metav1.ConditionStatus
 		wantPausedTS bool
 	}{
-		{name: "Paused=True sets paused_time timestamp", status: metav1.ConditionTrue, wantPausedTS: true},
-		{name: "Paused=False does not set paused_time", status: metav1.ConditionFalse, wantPausedTS: false},
+		{name: "Paused=False sets unpaused_time timestamp", status: metav1.ConditionFalse, wantPausedTS: true},
+		{name: "Paused=True does not set unpaused_time", status: metav1.ConditionTrue, wantPausedTS: false},
 	}
 
 	for _, tt := range tests {
@@ -613,9 +614,9 @@ func TestRecordSandboxMetrics_PausedConditionTrueTimestamp(t *testing.T) {
 			defer deleteSandboxMetrics("default", sbName)
 
 			if tt.wantPausedTS {
-				ts := testutil.ToFloat64(sandboxStatusPausedTime.WithLabelValues("default", sbName))
+				ts := testutil.ToFloat64(sandboxStatusUnpausedTime.WithLabelValues("default", sbName))
 				if ts != float64(now.Unix()) {
-					t.Errorf("sandbox_status_paused_time = %v, want %v", ts, float64(now.Unix()))
+					t.Errorf("sandbox_status_unpaused_time = %v, want %v", ts, float64(now.Unix()))
 				}
 			}
 		})
@@ -628,8 +629,8 @@ func TestRecordSandboxMetrics_ResumedConditionTrueTimestamp(t *testing.T) {
 		status        metav1.ConditionStatus
 		wantResumedTS bool
 	}{
-		{name: "Resumed=True sets resumed_time timestamp", status: metav1.ConditionTrue, wantResumedTS: true},
-		{name: "Resumed=False does not set resumed_time", status: metav1.ConditionFalse, wantResumedTS: false},
+		{name: "Resumed=False sets unresumed_time timestamp", status: metav1.ConditionFalse, wantResumedTS: true},
+		{name: "Resumed=True does not set unresumed_time", status: metav1.ConditionTrue, wantResumedTS: false},
 	}
 
 	for _, tt := range tests {
@@ -658,9 +659,9 @@ func TestRecordSandboxMetrics_ResumedConditionTrueTimestamp(t *testing.T) {
 			defer deleteSandboxMetrics("default", sbName)
 
 			if tt.wantResumedTS {
-				ts := testutil.ToFloat64(sandboxStatusResumedTime.WithLabelValues("default", sbName))
+				ts := testutil.ToFloat64(sandboxStatusUnresumedTime.WithLabelValues("default", sbName))
 				if ts != float64(now.Unix()) {
-					t.Errorf("sandbox_status_resumed_time = %v, want %v", ts, float64(now.Unix()))
+					t.Errorf("sandbox_status_unresumed_time = %v, want %v", ts, float64(now.Unix()))
 				}
 			}
 		})
@@ -674,8 +675,8 @@ func TestRecordSandboxMetrics_InplaceUpdateConditionTrueTimestamp(t *testing.T) 
 		wantDone   float64
 		wantDoneTS bool
 	}{
-		{name: "InplaceUpdate=True sets done=1 with timestamp", status: metav1.ConditionTrue, wantDone: 1, wantDoneTS: true},
-		{name: "InplaceUpdate=False sets done=0", status: metav1.ConditionFalse, wantDone: 0, wantDoneTS: false},
+		{name: "InplaceUpdate=False sets updating=1 with timestamp", status: metav1.ConditionFalse, wantDone: 1, wantDoneTS: true},
+		{name: "InplaceUpdate=True sets updating=0", status: metav1.ConditionTrue, wantDone: 0, wantDoneTS: false},
 	}
 
 	for _, tt := range tests {
@@ -703,14 +704,14 @@ func TestRecordSandboxMetrics_InplaceUpdateConditionTrueTimestamp(t *testing.T) 
 			recordSandboxMetrics(sandbox)
 			defer deleteSandboxMetrics("default", sbName)
 
-			val := testutil.ToFloat64(sandboxStatusInplaceUpdateDone.WithLabelValues("default", sbName))
+			val := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues("default", sbName))
 			if val != tt.wantDone {
-				t.Errorf("sandbox_status_inplace_update_done = %v, want %v", val, tt.wantDone)
+				t.Errorf("sandbox_status_inplace_updating = %v, want %v", val, tt.wantDone)
 			}
 			if tt.wantDoneTS {
-				ts := testutil.ToFloat64(sandboxStatusInplaceUpdateDoneTime.WithLabelValues("default", sbName))
+				ts := testutil.ToFloat64(sandboxStatusInplaceUpdatingTime.WithLabelValues("default", sbName))
 				if ts != float64(now.Unix()) {
-					t.Errorf("sandbox_status_inplace_update_done_time = %v, want %v", ts, float64(now.Unix()))
+					t.Errorf("sandbox_status_inplace_updating_time = %v, want %v", ts, float64(now.Unix()))
 				}
 			}
 		})
@@ -736,17 +737,17 @@ func TestDeleteSandboxMetrics_NewMetrics(t *testing.T) {
 				},
 				{
 					Type:               string(agentsv1alpha1.SandboxConditionPaused),
-					Status:             metav1.ConditionTrue,
+					Status:             metav1.ConditionFalse,
 					LastTransitionTime: now,
 				},
 				{
 					Type:               string(agentsv1alpha1.SandboxConditionResumed),
-					Status:             metav1.ConditionTrue,
+					Status:             metav1.ConditionFalse,
 					LastTransitionTime: now,
 				},
 				{
 					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
-					Status:             metav1.ConditionTrue,
+					Status:             metav1.ConditionFalse,
 					LastTransitionTime: now,
 				},
 			},
@@ -759,14 +760,23 @@ func TestDeleteSandboxMetrics_NewMetrics(t *testing.T) {
 	if v := testutil.ToFloat64(sandboxStatusReady.WithLabelValues(ns, name)); v != 0 {
 		t.Errorf("sandbox_status_ready before delete = %v, want 0", v)
 	}
-	if v := testutil.ToFloat64(sandboxStatusPausedTime.WithLabelValues(ns, name)); v == 0 {
-		t.Errorf("sandbox_status_paused_time before delete should be set")
+	if v := testutil.ToFloat64(sandboxStatusUnpaused.WithLabelValues(ns, name)); v != 1 {
+		t.Errorf("sandbox_status_unpaused before delete = %v, want 1", v)
 	}
-	if v := testutil.ToFloat64(sandboxStatusResumedTime.WithLabelValues(ns, name)); v == 0 {
-		t.Errorf("sandbox_status_resumed_time before delete should be set")
+	if v := testutil.ToFloat64(sandboxStatusUnpausedTime.WithLabelValues(ns, name)); v == 0 {
+		t.Errorf("sandbox_status_unpaused_time before delete should be set")
 	}
-	if v := testutil.ToFloat64(sandboxStatusInplaceUpdateDone.WithLabelValues(ns, name)); v != 1 {
-		t.Errorf("sandbox_status_inplace_update_done before delete = %v, want 1", v)
+	if v := testutil.ToFloat64(sandboxStatusUnresumed.WithLabelValues(ns, name)); v != 1 {
+		t.Errorf("sandbox_status_unresumed before delete = %v, want 1", v)
+	}
+	if v := testutil.ToFloat64(sandboxStatusUnresumedTime.WithLabelValues(ns, name)); v == 0 {
+		t.Errorf("sandbox_status_unresumed_time before delete should be set")
+	}
+	if v := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues(ns, name)); v != 1 {
+		t.Errorf("sandbox_status_inplace_updating before delete = %v, want 1", v)
+	}
+	if v := testutil.ToFloat64(sandboxStatusInplaceUpdatingTime.WithLabelValues(ns, name)); v == 0 {
+		t.Errorf("sandbox_status_inplace_updating_time before delete should be set")
 	}
 
 	// Delete and verify cleanup
@@ -775,17 +785,23 @@ func TestDeleteSandboxMetrics_NewMetrics(t *testing.T) {
 	if v := testutil.ToFloat64(sandboxStatusReady.WithLabelValues(ns, name)); v != 0 {
 		t.Errorf("sandbox_status_ready after delete = %v, want 0", v)
 	}
-	if v := testutil.ToFloat64(sandboxStatusPausedTime.WithLabelValues(ns, name)); v != 0 {
-		t.Errorf("sandbox_status_paused_time after delete = %v, want 0", v)
+	if v := testutil.ToFloat64(sandboxStatusUnpaused.WithLabelValues(ns, name)); v != 0 {
+		t.Errorf("sandbox_status_unpaused after delete = %v, want 0", v)
 	}
-	if v := testutil.ToFloat64(sandboxStatusResumedTime.WithLabelValues(ns, name)); v != 0 {
-		t.Errorf("sandbox_status_resumed_time after delete = %v, want 0", v)
+	if v := testutil.ToFloat64(sandboxStatusUnpausedTime.WithLabelValues(ns, name)); v != 0 {
+		t.Errorf("sandbox_status_unpaused_time after delete = %v, want 0", v)
 	}
-	if v := testutil.ToFloat64(sandboxStatusInplaceUpdateDone.WithLabelValues(ns, name)); v != 0 {
-		t.Errorf("sandbox_status_inplace_update_done after delete = %v, want 0", v)
+	if v := testutil.ToFloat64(sandboxStatusUnresumed.WithLabelValues(ns, name)); v != 0 {
+		t.Errorf("sandbox_status_unresumed after delete = %v, want 0", v)
 	}
-	if v := testutil.ToFloat64(sandboxStatusInplaceUpdateDoneTime.WithLabelValues(ns, name)); v != 0 {
-		t.Errorf("sandbox_status_inplace_update_done_time after delete = %v, want 0", v)
+	if v := testutil.ToFloat64(sandboxStatusUnresumedTime.WithLabelValues(ns, name)); v != 0 {
+		t.Errorf("sandbox_status_unresumed_time after delete = %v, want 0", v)
+	}
+	if v := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues(ns, name)); v != 0 {
+		t.Errorf("sandbox_status_inplace_updating after delete = %v, want 0", v)
+	}
+	if v := testutil.ToFloat64(sandboxStatusInplaceUpdatingTime.WithLabelValues(ns, name)); v != 0 {
+		t.Errorf("sandbox_status_inplace_updating_time after delete = %v, want 0", v)
 	}
 }
 
@@ -836,14 +852,18 @@ func TestRecordSandboxMetrics_AllConditions(t *testing.T) {
 		t.Errorf("sandbox_status_ready_time = %v, want %v", v, float64(now.Unix()))
 	}
 
-	// Resumed=True: resumed_time should be set
-	if v := testutil.ToFloat64(sandboxStatusResumedTime.WithLabelValues(ns, name)); v != float64(now.Unix()) {
-		t.Errorf("sandbox_status_resumed_time = %v, want %v", v, float64(now.Unix()))
+	// Resumed=True: unresumed=0
+	if v := testutil.ToFloat64(sandboxStatusUnresumed.WithLabelValues(ns, name)); v != 0 {
+		t.Errorf("sandbox_status_unresumed = %v, want 0", v)
 	}
 
-	// InplaceUpdate=False: inplace_update_done=0
-	if v := testutil.ToFloat64(sandboxStatusInplaceUpdateDone.WithLabelValues(ns, name)); v != 0 {
-		t.Errorf("sandbox_status_inplace_update_done = %v, want 0", v)
+	// InplaceUpdate=False: inplace_updating=1 (negative semantics)
+	if v := testutil.ToFloat64(sandboxStatusInplaceUpdating.WithLabelValues(ns, name)); v != 1 {
+		t.Errorf("sandbox_status_inplace_updating = %v, want 1", v)
+	}
+	// unpaused_time should be set (Paused=False)
+	if v := testutil.ToFloat64(sandboxStatusUnpausedTime.WithLabelValues(ns, name)); v != float64(now.Unix()) {
+		t.Errorf("sandbox_status_unpaused_time = %v, want %v", v, float64(now.Unix()))
 	}
 }
 
@@ -931,21 +951,21 @@ func TestRecordSandboxMetrics_InfoPartialFields(t *testing.T) {
 	}
 }
 
-// creationToReadyHistogramSum collects the current sample sum from the creation-to-ready Histogram.
-func creationToReadyHistogramSum(t *testing.T) float64 {
+// creationToReadyHistogramSum collects the current sample sum from the creation-to-ready HistogramVec for a given namespace.
+func creationToReadyHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxCreationDuration.Write(m); err != nil {
+	if err := sandboxCreationDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
 }
 
-// inplaceUpdateHistogramSum collects the current sample sum from the inplace-update Histogram.
-func inplaceUpdateHistogramSum(t *testing.T) float64 {
+// inplaceUpdateHistogramSum collects the current sample sum from the inplace-update HistogramVec for a given namespace.
+func inplaceUpdateHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxInplaceUpdateDuration.Write(m); err != nil {
+	if err := sandboxInplaceUpdateDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
@@ -955,7 +975,7 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 	now := time.Now()
 	creationTime := now.Add(-45 * time.Second)
 	readyTime := metav1.NewTime(now)
-	ns, name := "default", "ready-duration-sandbox"
+	ns, name := "creation-dur-observed", "ready-duration-sandbox"
 
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -975,11 +995,11 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 		},
 	}
 
-	beforeSum := creationToReadyHistogramSum(t)
+	beforeSum := creationToReadyHistogramSum(t, ns)
 
 	// First call should observe
 	recordSandboxMetrics(sandbox)
-	afterFirstSum := creationToReadyHistogramSum(t)
+	afterFirstSum := creationToReadyHistogramSum(t, ns)
 	expectedDuration := readyTime.Sub(creationTime).Seconds()
 	if delta := afterFirstSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("first observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -987,16 +1007,18 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 
 	// Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := creationToReadyHistogramSum(t)
+	afterSecondSum := creationToReadyHistogramSum(t, ns)
 	if afterSecondSum != afterFirstSum {
 		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
 	}
 
 	// Delete and re-record should observe again
 	deleteSandboxMetrics(ns, name)
+	// After delete, the namespace-level histogram still exists; read the new baseline.
+	baselineAfterDelete := creationToReadyHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
-	afterReObserve := creationToReadyHistogramSum(t)
-	if delta := afterReObserve - afterSecondSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
+	afterReObserve := creationToReadyHistogramSum(t, ns)
+	if delta := afterReObserve - baselineAfterDelete; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("re-observation after delete: sum delta = %v, want ~%v", delta, expectedDuration)
 	}
 
@@ -1005,7 +1027,7 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 
 func TestSandboxCreationToReadyDuration_NotObservedWhenNotReady(t *testing.T) {
 	now := time.Now()
-	ns, name := "default", "notready-duration-sandbox"
+	ns, name := "creation-dur-notready", "notready-duration-sandbox"
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
@@ -1024,9 +1046,9 @@ func TestSandboxCreationToReadyDuration_NotObservedWhenNotReady(t *testing.T) {
 		},
 	}
 
-	beforeSum := creationToReadyHistogramSum(t)
+	beforeSum := creationToReadyHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
-	afterSum := creationToReadyHistogramSum(t)
+	afterSum := creationToReadyHistogramSum(t, ns)
 
 	if afterSum != beforeSum {
 		t.Errorf("not-ready should not observe histogram: sum changed from %v to %v", beforeSum, afterSum)
@@ -1038,7 +1060,7 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 	now := time.Now()
 	startTime := now.Add(-20 * time.Second)
 	endTime := now
-	ns, name := "default", "inplace-duration-sandbox"
+	ns, name := "inplace-dur-observed", "inplace-duration-sandbox"
 
 	// Step 1: Record with InplaceUpdate=False (stores start time)
 	sandbox := &agentsv1alpha1.Sandbox{
@@ -1059,11 +1081,11 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 		},
 	}
 
-	beforeSum := inplaceUpdateHistogramSum(t)
+	beforeSum := inplaceUpdateHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
 
 	// No histogram observation yet (only False recorded)
-	afterFalseSum := inplaceUpdateHistogramSum(t)
+	afterFalseSum := inplaceUpdateHistogramSum(t, ns)
 	if afterFalseSum != beforeSum {
 		t.Errorf("InplaceUpdate=False should not observe histogram: sum changed from %v to %v", beforeSum, afterFalseSum)
 	}
@@ -1073,7 +1095,7 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
 	recordSandboxMetrics(sandbox)
-	afterTrueSum := inplaceUpdateHistogramSum(t)
+	afterTrueSum := inplaceUpdateHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("InplaceUpdate=True observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -1081,7 +1103,7 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 
 	// Step 3: Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := inplaceUpdateHistogramSum(t)
+	afterSecondSum := inplaceUpdateHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second InplaceUpdate=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
 	}
@@ -1090,21 +1112,21 @@ func TestSandboxInplaceUpdateDuration_ObservedOnce(t *testing.T) {
 	deleteSandboxMetrics(ns, name)
 }
 
-// pauseDurationHistogramSum collects the current sample sum from the pause duration Histogram.
-func pauseDurationHistogramSum(t *testing.T) float64 {
+// pauseDurationHistogramSum collects the current sample sum from the pause duration HistogramVec for a given namespace.
+func pauseDurationHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxPauseDuration.Write(m); err != nil {
+	if err := sandboxPauseDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
 }
 
-// resumeDurationHistogramSum collects the current sample sum from the resume duration Histogram.
-func resumeDurationHistogramSum(t *testing.T) float64 {
+// resumeDurationHistogramSum collects the current sample sum from the resume duration HistogramVec for a given namespace.
+func resumeDurationHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxResumeDuration.Write(m); err != nil {
+	if err := sandboxResumeDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
@@ -1114,7 +1136,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 	now := time.Now()
 	startTime := now.Add(-15 * time.Second)
 	endTime := now
-	ns, name := "default", "pause-duration-sandbox"
+	ns, name := "pause-dur-test", "pause-duration-sandbox"
 
 	// Clean up global state
 	pauseStartTimes.Delete(ns + "/" + name)
@@ -1139,11 +1161,11 @@ func TestSandboxPauseDuration(t *testing.T) {
 		},
 	}
 
-	beforeSum := pauseDurationHistogramSum(t)
+	beforeSum := pauseDurationHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
 
 	// No histogram observation yet (only False recorded)
-	afterFalseSum := pauseDurationHistogramSum(t)
+	afterFalseSum := pauseDurationHistogramSum(t, ns)
 	if afterFalseSum != beforeSum {
 		t.Errorf("Paused=False should not observe histogram: sum changed from %v to %v", beforeSum, afterFalseSum)
 	}
@@ -1153,7 +1175,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
 	recordSandboxMetrics(sandbox)
-	afterTrueSum := pauseDurationHistogramSum(t)
+	afterTrueSum := pauseDurationHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("Paused=True observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -1161,7 +1183,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 
 	// Step 3: Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := pauseDurationHistogramSum(t)
+	afterSecondSum := pauseDurationHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second Paused=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
 	}
@@ -1174,7 +1196,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 	now := time.Now()
 	startTime := now.Add(-10 * time.Second)
 	endTime := now
-	ns, name := "default", "resume-duration-sandbox"
+	ns, name := "resume-dur-test", "resume-duration-sandbox"
 
 	// Clean up global state
 	resumeStartTimes.Delete(ns + "/" + name)
@@ -1199,11 +1221,11 @@ func TestSandboxResumeDuration(t *testing.T) {
 		},
 	}
 
-	beforeSum := resumeDurationHistogramSum(t)
+	beforeSum := resumeDurationHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
 
 	// No histogram observation yet (only False recorded)
-	afterFalseSum := resumeDurationHistogramSum(t)
+	afterFalseSum := resumeDurationHistogramSum(t, ns)
 	if afterFalseSum != beforeSum {
 		t.Errorf("Resumed=False should not observe histogram: sum changed from %v to %v", beforeSum, afterFalseSum)
 	}
@@ -1213,7 +1235,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
 	recordSandboxMetrics(sandbox)
-	afterTrueSum := resumeDurationHistogramSum(t)
+	afterTrueSum := resumeDurationHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
 		t.Errorf("Resumed=True observation: sum delta = %v, want ~%v", delta, expectedDuration)
@@ -1221,7 +1243,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 
 	// Step 3: Second call should NOT observe (deduplicated)
 	recordSandboxMetrics(sandbox)
-	afterSecondSum := resumeDurationHistogramSum(t)
+	afterSecondSum := resumeDurationHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second Resumed=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
 	}
@@ -1232,7 +1254,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 
 func TestSandboxInplaceUpdateDuration_NotObservedWithoutStartTime(t *testing.T) {
 	now := time.Now()
-	ns, name := "default", "inplace-no-start-sandbox"
+	ns, name := "inplace-dur-nostart", "inplace-no-start-sandbox"
 
 	// Directly set InplaceUpdate=True without prior False record
 	sandbox := &agentsv1alpha1.Sandbox{
@@ -1253,9 +1275,9 @@ func TestSandboxInplaceUpdateDuration_NotObservedWithoutStartTime(t *testing.T) 
 		},
 	}
 
-	beforeSum := inplaceUpdateHistogramSum(t)
+	beforeSum := inplaceUpdateHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox)
-	afterSum := inplaceUpdateHistogramSum(t)
+	afterSum := inplaceUpdateHistogramSum(t, ns)
 
 	if afterSum != beforeSum {
 		t.Errorf("InplaceUpdate=True without prior False should not observe: sum changed from %v to %v", beforeSum, afterSum)
@@ -1342,6 +1364,623 @@ func TestInitSandboxLabelsMetric_EmptyAllowlist(t *testing.T) {
 	InitSandboxLabelsMetric(nil)
 	if sandboxLabels != nil {
 		t.Errorf("sandboxLabels should be nil after nil allowlist init")
+	}
+}
+
+// counterValue reads the current value of a CounterVec for specific label values.
+func counterValue(t *testing.T, cv *prometheus.CounterVec, lvs ...string) float64 {
+	t.Helper()
+	return testutil.ToFloat64(cv.WithLabelValues(lvs...))
+}
+
+// histogramSampleCount reads the sample count from a Histogram metric.
+func histogramSampleCount(t *testing.T, hv *prometheus.HistogramVec, lvs ...string) uint64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := hv.WithLabelValues(lvs...).(prometheus.Metric).Write(m); err != nil {
+		t.Fatalf("failed to write histogram metric: %v", err)
+	}
+	return m.GetHistogram().GetSampleCount()
+}
+
+// histogramSampleSum reads the sample sum from a Histogram metric.
+func histogramSampleSum(t *testing.T, hv *prometheus.HistogramVec, lvs ...string) float64 {
+	t.Helper()
+	m := &dto.Metric{}
+	if err := hv.WithLabelValues(lvs...).(prometheus.Metric).Write(m); err != nil {
+		t.Fatalf("failed to write histogram metric: %v", err)
+	}
+	return m.GetHistogram().GetSampleSum()
+}
+
+func TestSandboxCreationTotal(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(ns, sbName string)
+		sandboxFunc func(ns, sbName string) *agentsv1alpha1.Sandbox
+		verify      func(t *testing.T, ns, sbName string)
+	}{
+		{
+			name: "creation success increments counter on first Ready=True",
+			setup: func(ns, sbName string) {
+				observedCreationToReady.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
+			},
+			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
+				now := time.Now()
+				return &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-30 * time.Second)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionTrue,
+							LastTransitionTime: metav1.NewTime(now),
+						}},
+					},
+				}
+			},
+			verify: func(t *testing.T, ns, sbName string) {
+				val := counterValue(t, sandboxCreationTotal, ns, "success")
+				if val != 1 {
+					t.Errorf("sandbox_creation_total{result=success} = %v, want 1", val)
+				}
+			},
+		},
+		{
+			name: "creation failure increments counter on Phase=Failed",
+			setup: func(ns, sbName string) {
+				observedCreationFailure.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
+			},
+			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
+				return &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(time.Now()),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxFailed,
+					},
+				}
+			},
+			verify: func(t *testing.T, ns, sbName string) {
+				val := counterValue(t, sandboxCreationTotal, ns, "failure")
+				if val != 1 {
+					t.Errorf("sandbox_creation_total{result=failure} = %v, want 1", val)
+				}
+			},
+		},
+		{
+			name: "duplicate calls do not re-increment success counter",
+			setup: func(ns, sbName string) {
+				observedCreationToReady.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
+			},
+			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
+				now := time.Now()
+				return &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Second)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionTrue,
+							LastTransitionTime: metav1.NewTime(now),
+						}},
+					},
+				}
+			},
+			verify: func(t *testing.T, ns, sbName string) {
+				// Call recordSandboxMetrics a second time and ensure counter doesn't increase
+				before := counterValue(t, sandboxCreationTotal, ns, "success")
+				now := time.Now()
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-10 * time.Second)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionTrue,
+							LastTransitionTime: metav1.NewTime(now),
+						}},
+					},
+				}
+				recordSandboxMetrics(sb)
+				after := counterValue(t, sandboxCreationTotal, ns, "success")
+				if after != before {
+					t.Errorf("duplicate call incremented counter: before=%v, after=%v", before, after)
+				}
+			},
+		},
+		{
+			name: "deleteSandboxMetrics does not remove namespace-level creation counter",
+			setup: func(ns, sbName string) {
+				observedCreationToReady.Delete(ns + "/" + sbName)
+				sandboxCreationTotal.Reset()
+			},
+			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
+				now := time.Now()
+				return &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-5 * time.Second)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionReady),
+							Status:             metav1.ConditionTrue,
+							LastTransitionTime: metav1.NewTime(now),
+						}},
+					},
+				}
+			},
+			verify: func(t *testing.T, ns, sbName string) {
+				deleteSandboxMetrics(ns, sbName)
+				// Counter is namespace-level, so it persists after per-sandbox deletion
+				val := counterValue(t, sandboxCreationTotal, ns, "success")
+				if val != 1 {
+					t.Errorf("sandbox_creation_total after delete = %v, want 1 (namespace-level persists)", val)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "default"
+			sbName := "creation-total-" + tt.name
+			tt.setup(ns, sbName)
+			sb := tt.sandboxFunc(ns, sbName)
+			recordSandboxMetrics(sb)
+			defer deleteSandboxMetrics(ns, sbName)
+			tt.verify(t, ns, sbName)
+		})
+	}
+}
+
+func TestSandboxPauseTotal(t *testing.T) {
+	tests := []struct {
+		name   string
+		verify func(t *testing.T, ns, sbName string)
+	}{
+		{
+			name: "pause success increments counter on first Paused=True observation",
+			verify: func(t *testing.T, ns, sbName string) {
+				now := time.Now()
+				key := ns + "/" + sbName
+				pauseStartTimes.Delete(key)
+				observedPauseDurations.Delete(key)
+				sandboxPauseTotal.Reset()
+
+				// Step 1: Paused=False stores start time
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionPaused),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Second)),
+						}},
+					},
+				}
+				recordSandboxMetrics(sb)
+
+				// Step 2: Paused=True should increment
+				sb.Status.Phase = agentsv1alpha1.SandboxPaused
+				sb.Status.Conditions[0].Status = metav1.ConditionTrue
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
+				recordSandboxMetrics(sb)
+
+				val := counterValue(t, sandboxPauseTotal, ns, "success")
+				if val != 1 {
+					t.Errorf("sandbox_pause_total{result=success} = %v, want 1", val)
+				}
+			},
+		},
+		{
+			name: "duplicate calls do not re-increment pause counter",
+			verify: func(t *testing.T, ns, sbName string) {
+				now := time.Now()
+				key := ns + "/" + sbName
+				pauseStartTimes.Delete(key)
+				observedPauseDurations.Delete(key)
+				sandboxPauseTotal.Reset()
+
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionPaused),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Second)),
+						}},
+					},
+				}
+				recordSandboxMetrics(sb)
+
+				sb.Status.Phase = agentsv1alpha1.SandboxPaused
+				sb.Status.Conditions[0].Status = metav1.ConditionTrue
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
+				recordSandboxMetrics(sb)
+
+				before := counterValue(t, sandboxPauseTotal, ns, "success")
+				recordSandboxMetrics(sb)
+				after := counterValue(t, sandboxPauseTotal, ns, "success")
+				if after != before {
+					t.Errorf("duplicate pause call incremented: before=%v, after=%v", before, after)
+				}
+			},
+		},
+		{
+			name: "new pause cycle after cleanup can re-count",
+			verify: func(t *testing.T, ns, sbName string) {
+				now := time.Now()
+				key := ns + "/" + sbName
+				pauseStartTimes.Delete(key)
+				observedPauseDurations.Delete(key)
+				sandboxPauseTotal.Reset()
+
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionPaused),
+							Status:             metav1.ConditionFalse,
+							LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Second)),
+						}},
+					},
+				}
+				recordSandboxMetrics(sb)
+				sb.Status.Phase = agentsv1alpha1.SandboxPaused
+				sb.Status.Conditions[0].Status = metav1.ConditionTrue
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
+				recordSandboxMetrics(sb)
+
+				// Simulate a new pause cycle by resetting condition to False
+				sb.Status.Phase = agentsv1alpha1.SandboxRunning
+				sb.Status.Conditions[0].Status = metav1.ConditionFalse
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(1 * time.Second))
+				recordSandboxMetrics(sb)
+
+				sb.Status.Phase = agentsv1alpha1.SandboxPaused
+				sb.Status.Conditions[0].Status = metav1.ConditionTrue
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(5 * time.Second))
+				recordSandboxMetrics(sb)
+
+				val := counterValue(t, sandboxPauseTotal, ns, "success")
+				if val != 2 {
+					t.Errorf("sandbox_pause_total after new cycle = %v, want 2", val)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "default"
+			sbName := "pause-total-" + tt.name
+			defer deleteSandboxMetrics(ns, sbName)
+			tt.verify(t, ns, sbName)
+		})
+	}
+}
+
+func TestSandboxResumeTotal(t *testing.T) {
+	tests := []struct {
+		name   string
+		verify func(t *testing.T, ns, sbName string)
+	}{
+		{
+			name: "resume success increments counter on first Resumed=True observation",
+			verify: func(t *testing.T, ns, sbName string) {
+				now := time.Now()
+				key := ns + "/" + sbName
+				resumeStartTimes.Delete(key)
+				observedResumeDurations.Delete(key)
+				sandboxResumeTotal.Reset()
+
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxResuming,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionResumed),
+							Status:             metav1.ConditionFalse,
+							Reason:             "CreatePod",
+							LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Second)),
+						}},
+					},
+				}
+				recordSandboxMetrics(sb)
+
+				sb.Status.Phase = agentsv1alpha1.SandboxRunning
+				sb.Status.Conditions[0].Status = metav1.ConditionTrue
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
+				recordSandboxMetrics(sb)
+
+				val := counterValue(t, sandboxResumeTotal, ns, "success")
+				if val != 1 {
+					t.Errorf("sandbox_resume_total{result=success} = %v, want 1", val)
+				}
+			},
+		},
+		{
+			name: "duplicate calls do not re-increment resume counter",
+			verify: func(t *testing.T, ns, sbName string) {
+				now := time.Now()
+				key := ns + "/" + sbName
+				resumeStartTimes.Delete(key)
+				observedResumeDurations.Delete(key)
+				sandboxResumeTotal.Reset()
+
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxResuming,
+						Conditions: []metav1.Condition{{
+							Type:               string(agentsv1alpha1.SandboxConditionResumed),
+							Status:             metav1.ConditionFalse,
+							Reason:             "CreatePod",
+							LastTransitionTime: metav1.NewTime(now.Add(-10 * time.Second)),
+						}},
+					},
+				}
+				recordSandboxMetrics(sb)
+
+				sb.Status.Phase = agentsv1alpha1.SandboxRunning
+				sb.Status.Conditions[0].Status = metav1.ConditionTrue
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
+				recordSandboxMetrics(sb)
+
+				before := counterValue(t, sandboxResumeTotal, ns, "success")
+				recordSandboxMetrics(sb)
+				after := counterValue(t, sandboxResumeTotal, ns, "success")
+				if after != before {
+					t.Errorf("duplicate resume call incremented: before=%v, after=%v", before, after)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "default"
+			sbName := "resume-total-" + tt.name
+			defer deleteSandboxMetrics(ns, sbName)
+			tt.verify(t, ns, sbName)
+		})
+	}
+}
+
+func TestSandboxDeletionDuration(t *testing.T) {
+	tests := []struct {
+		name   string
+		verify func(t *testing.T, ns, sbName string)
+	}{
+		{
+			name: "deletion duration is observed after deleteSandboxMetrics",
+			verify: func(t *testing.T, ns, sbName string) {
+				now := time.Now()
+				delTime := metav1.NewTime(now.Add(-2 * time.Second))
+
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
+						DeletionTimestamp: &delTime,
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxTerminating,
+					},
+				}
+
+				// Record metrics stores the deletion start time
+				recordSandboxMetrics(sb)
+
+				// Verify deletionStartTimes has entry after recordSandboxMetrics
+				key := ns + "/" + sbName
+				startTimeVal, ok := deletionStartTimes.Load(key)
+				if !ok {
+					t.Fatal("deletionStartTimes should have entry after recordSandboxMetrics with DeletionTimestamp")
+				}
+				startTime := startTimeVal.(time.Time)
+				if !startTime.Equal(delTime.Time) {
+					t.Errorf("stored deletion start time = %v, want %v", startTime, delTime.Time)
+				}
+
+				// Before delete, histogram should have 0 samples
+				before := histogramSampleCount(t, sandboxDeletionDuration, ns)
+				if before != 0 {
+					t.Errorf("deletion duration sample count before delete = %v, want 0", before)
+				}
+
+				// Call deleteSandboxMetrics - this observes duration then deletes the series.
+				// Since the series is deleted after observation, we verify the code path
+				// executed by checking that deletionStartTimes entry was consumed.
+				deleteSandboxMetrics(ns, sbName)
+
+				// Verify deletionStartTimes entry was consumed (proves Observe was called)
+				_, stillExists := deletionStartTimes.Load(key)
+				if stillExists {
+					t.Errorf("deletionStartTimes should be cleaned after deleteSandboxMetrics")
+				}
+			},
+		},
+		{
+			name: "no deletion duration observed without DeletionTimestamp",
+			verify: func(t *testing.T, ns, sbName string) {
+				now := time.Now()
+				sb := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: sbName, Namespace: ns,
+						CreationTimestamp: metav1.NewTime(now),
+					},
+					Status: agentsv1alpha1.SandboxStatus{
+						Phase: agentsv1alpha1.SandboxRunning,
+					},
+				}
+				recordSandboxMetrics(sb)
+
+				before := histogramSampleCount(t, sandboxDeletionDuration, ns)
+				deleteSandboxMetrics(ns, sbName)
+				after := histogramSampleCount(t, sandboxDeletionDuration, ns)
+				if after != before {
+					t.Errorf("deletion duration should not be observed without DeletionTimestamp: before=%v, after=%v", before, after)
+				}
+			},
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := fmt.Sprintf("del-dur-ns-%d", i)
+			sbName := "del-dur-" + tt.name
+			// Clean global state
+			deletionStartTimes.Delete(ns + "/" + sbName)
+			tt.verify(t, ns, sbName)
+		})
+	}
+}
+
+func TestSandboxStatusAbnormal(t *testing.T) {
+	tests := []struct {
+		name              string
+		phase             agentsv1alpha1.SandboxPhase
+		conditions        []metav1.Condition
+		wantPauseAbnormal float64
+		wantResumeAbnormal float64
+	}{
+		{
+			name:  "Phase=Paused with SandboxPaused=False is abnormal",
+			phase: agentsv1alpha1.SandboxPaused,
+			conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.NewTime(time.Now()),
+			}},
+			wantPauseAbnormal:  1,
+			wantResumeAbnormal: 0,
+		},
+		{
+			name:  "Phase=Paused with SandboxPaused=True is normal",
+			phase: agentsv1alpha1.SandboxPaused,
+			conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionTrue,
+				LastTransitionTime: metav1.NewTime(time.Now()),
+			}},
+			wantPauseAbnormal:  0,
+			wantResumeAbnormal: 0,
+		},
+		{
+			name:  "Phase=Resuming with SandboxResumed=False is abnormal",
+			phase: agentsv1alpha1.SandboxResuming,
+			conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionFalse,
+				Reason:             "CreatePod",
+				LastTransitionTime: metav1.NewTime(time.Now()),
+			}},
+			wantPauseAbnormal:  0,
+			wantResumeAbnormal: 1,
+		},
+		{
+			name:  "Phase=Resuming with SandboxResumed=True is normal",
+			phase: agentsv1alpha1.SandboxResuming,
+			conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionResumed),
+				Status:             metav1.ConditionTrue,
+				Reason:             "CreatePod",
+				LastTransitionTime: metav1.NewTime(time.Now()),
+			}},
+			wantPauseAbnormal:  0,
+			wantResumeAbnormal: 0,
+		},
+		{
+			name:               "Phase=Running has no abnormal state",
+			phase:              agentsv1alpha1.SandboxRunning,
+			conditions:         nil,
+			wantPauseAbnormal:  0,
+			wantResumeAbnormal: 0,
+		},
+		{
+			name:  "Phase=Paused with no Paused condition is abnormal",
+			phase: agentsv1alpha1.SandboxPaused,
+			conditions: nil,
+			wantPauseAbnormal:  1,
+			wantResumeAbnormal: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "default"
+			sbName := "abnormal-" + tt.name
+
+			sb := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: sbName, Namespace: ns,
+					CreationTimestamp: metav1.NewTime(time.Now()),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:      tt.phase,
+					Conditions: tt.conditions,
+				},
+			}
+
+			recordSandboxMetrics(sb)
+			defer deleteSandboxMetrics(ns, sbName)
+
+			pauseVal := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, sbName, "pause_incomplete"))
+			if pauseVal != tt.wantPauseAbnormal {
+				t.Errorf("sandbox_status_abnormal{type=pause_incomplete} = %v, want %v", pauseVal, tt.wantPauseAbnormal)
+			}
+
+			resumeVal := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, sbName, "resume_incomplete"))
+			if resumeVal != tt.wantResumeAbnormal {
+				t.Errorf("sandbox_status_abnormal{type=resume_incomplete} = %v, want %v", resumeVal, tt.wantResumeAbnormal)
+			}
+
+			// Verify cleanup removes abnormal metrics
+			deleteSandboxMetrics(ns, sbName)
+			pauseAfter := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, sbName, "pause_incomplete"))
+			if pauseAfter != 0 {
+				t.Errorf("sandbox_status_abnormal{type=pause_incomplete} after delete = %v, want 0", pauseAfter)
+			}
+			resumeAfter := testutil.ToFloat64(sandboxStatusAbnormal.WithLabelValues(ns, sbName, "resume_incomplete"))
+			if resumeAfter != 0 {
+				t.Errorf("sandbox_status_abnormal{type=resume_incomplete} after delete = %v, want 0", resumeAfter)
+			}
+		})
 	}
 }
 

@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -31,6 +31,10 @@ func (c *FakeApiV1alpha1) Checkpoints(namespace string) v1alpha1.CheckpointInter
 	return newFakeCheckpoints(c, namespace)
 }
 
+func (c *FakeApiV1alpha1) Commits(namespace string) v1alpha1.CommitInterface {
+	return newFakeCommits(c, namespace)
+}
+
 func (c *FakeApiV1alpha1) Sandboxes(namespace string) v1alpha1.SandboxInterface {
 	return newFakeSandboxes(c, namespace)
 }
@@ -47,8 +51,8 @@ func (c *FakeApiV1alpha1) SandboxTemplates(namespace string) v1alpha1.SandboxTem
 	return newFakeSandboxTemplates(c, namespace)
 }
 
-func (c *FakeApiV1alpha1) SandboxUpdateOpses(namespace string) v1alpha1.SandboxUpdateOpsInterface {
-	return newFakeSandboxUpdateOpses(c, namespace)
+func (c *FakeApiV1alpha1) Sandboxupdateops(namespace string) v1alpha1.SandboxUpdateOpsInterface {
+	return newFakeSandboxupdateops(c, namespace)
 }
 
 // RESTClient returns a RESTClient that is used to communicate

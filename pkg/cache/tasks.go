@@ -50,29 +50,46 @@ func (c *Cache) CheckpointUpdateFunc(ctx context.Context) cacheutils.UpdateFunc[
 
 // --- Factories --------------------------------------------------------------
 
-// NewSandboxPauseTask builds a WaitTask that succeeds when the sandbox reports
-// status.conditions[type=Paused].status == True.
-func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
+// NewSandboxPauseTask builds a pre-acquired WaitTask that succeeds when the
+// sandbox reports status.conditions[type=Paused].status == True.
+//
+// Pause is pre-acquired because it protects the caller-side spec.paused
+// mutation from racing with an opposite Resume wait. WaitReady and Checkpoint
+// stay lazy because they do not protect caller-side target-state mutation.
+func (c *Cache) NewSandboxPauseTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
+		if pausable, reason := sandboxutils.IsSandboxPausable(s); !pausable {
+			return false, fmt.Errorf("sandbox %s/%s is not pausable, reason: %s", s.Namespace, s.Name, reason)
+		}
 		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionPaused))
 		if cond == nil {
 			return false, nil
 		}
 		return cond.Status == metav1.ConditionTrue, nil
 	}
-	return cacheutils.NewWaitTask[*agentsv1alpha1.Sandbox](
+	return cacheutils.NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
 		ctx, c.waitHooks, cacheutils.WaitActionPause, sbx, c.SandboxUpdateFunc(ctx), check,
 	)
 }
 
-// NewSandboxResumeTask builds a WaitTask that succeeds when the sandbox reaches
-// SandboxStateRunning.
-func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
+// NewSandboxResumeTask builds a pre-acquired WaitTask that succeeds when the
+// sandbox Ready condition is True.
+//
+// Resume is pre-acquired because it protects the caller-side spec.paused
+// mutation from racing with an opposite Pause wait. WaitReady and Checkpoint
+// stay lazy because they do not protect caller-side target-state mutation.
+func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*cacheutils.WaitTask[*agentsv1alpha1.Sandbox], error) {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
-		state, _ := sandboxutils.GetSandboxState(s)
-		return state == agentsv1alpha1.SandboxStateRunning, nil
+		if resumable, reason := sandboxutils.IsSandboxResumable(s); !resumable {
+			return false, fmt.Errorf("sandbox %s/%s is not resumable, reason: %s", s.Namespace, s.Name, reason)
+		}
+		cond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionReady))
+		if cond == nil {
+			return false, nil
+		}
+		return cond.Status == metav1.ConditionTrue, nil
 	}
-	return cacheutils.NewWaitTask[*agentsv1alpha1.Sandbox](
+	return cacheutils.NewAcquiredWaitTask[*agentsv1alpha1.Sandbox](
 		ctx, c.waitHooks, cacheutils.WaitActionResume, sbx, c.SandboxUpdateFunc(ctx), check,
 	)
 }

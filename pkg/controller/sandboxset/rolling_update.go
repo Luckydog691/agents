@@ -145,10 +145,10 @@ func getMaxUnavailablePods(sbs *agentsv1alpha1.SandboxSet, replicas int) int {
 	// MaxUnavailable should already be set by webhook with default value "20%"
 	maxUnavailable := sbs.Spec.UpdateStrategy.MaxUnavailable
 
-	value, err := intstr.GetScaledValueFromIntOrPercent(intstr.ValueOrDefault(maxUnavailable, intstr.FromInt(0)), replicas, false)
+	value, err := intstr.GetScaledValueFromIntOrPercent(intstr.ValueOrDefault(maxUnavailable, intstr.FromInt(0)), replicas, true)
 	if err != nil {
 		// This should not happen after webhook validation
-		value = replicas * 20 / 100
+		value = 1
 	}
 	return value
 }
@@ -238,6 +238,9 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 		log.Info("sandbox to be deleted claimed before performed, skip")
 		return errors.New("sandbox to be deleted claimed before performed, skip")
 	}
+
+	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
+	sbx = sbx.DeepCopy()
 
 	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err := r.Update(ctx, sbx); err != nil {

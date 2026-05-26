@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -54,6 +54,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 	// Group=api, Version=v1alpha1
 	case v1alpha1.SchemeGroupVersion.WithResource("checkpoints"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().Checkpoints().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("commits"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().Commits().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxes"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().Sandboxes().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxclaims"):
@@ -62,8 +64,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().SandboxSets().Informer()}, nil
 	case v1alpha1.SchemeGroupVersion.WithResource("sandboxtemplates"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().SandboxTemplates().Informer()}, nil
-	case v1alpha1.SchemeGroupVersion.WithResource("sandboxupdateopses"):
-		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().SandboxUpdateOpses().Informer()}, nil
+	case v1alpha1.SchemeGroupVersion.WithResource("sandboxupdateops"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Api().V1alpha1().Sandboxupdateops().Informer()}, nil
 
 	}
 

@@ -46,6 +46,7 @@ type SandboxClaimSpec struct {
 	// whether all replicas were successfully claimed
 	// +optional
 	// +kubebuilder:default="1m"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="claimTimeout must be at least 1 second"
 	ClaimTimeout *metav1.Duration `json:"claimTimeout,omitempty"`
 
 	// TTLAfterCompleted specifies the time to live after the claim reaches Completed phase
@@ -57,19 +58,22 @@ type SandboxClaimSpec struct {
 	TTLAfterCompleted *metav1.Duration `json:"ttlAfterCompleted,omitempty"`
 
 	// Labels contains key-value pairs to be added as labels
-	// to claimed Sandbox resources
+	// to claimed Sandbox resources and synced to sandbox template labels.
 	// +optional
+	// +mapType=granular
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// Annotations contains key-value pairs to be added as annotations
 	// to claimed Sandbox resources
 	// +optional
+	// +mapType=granular
 	Annotations map[string]string `json:"annotations,omitempty"`
 
 	// EnvVars contains environment variables to be injected into the sandbox
 	// These will be passed to the sandbox's init endpoint (envd) after claiming
 	// Only applicable if the SandboxSet has envd enabled
 	// +optional
+	// +mapType=granular
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
 	// InplaceUpdate allows to perform inplace update for sandbox while claiming
@@ -78,10 +82,15 @@ type SandboxClaimSpec struct {
 
 	// DynamicVolumesMount specifies the dynamic volumes to be mounted into the sandbox
 	// +optional
-	DynamicVolumesMount []CSIMountConfig `json:"dynamicVolumesMount"`
+	// +patchMergeKey=mountPath
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=mountPath
+	DynamicVolumesMount []CSIMountConfig `json:"dynamicVolumesMount" patchMergeKey:"mountPath" patchStrategy:"merge"`
 
 	// Runtimes - Runtime configuration for sandbox object
 	// +optional
+	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
 
 	// Set ReserveFailedSandbox to true to reserve failed sandboxes
@@ -98,6 +107,7 @@ type SandboxClaimSpec struct {
 	// Format: duration string (e.g., "3h", "200s", "15m")
 	// +optional
 	// +kubebuilder:default="30s"
+	// +kubebuilder:validation:XValidation:rule="duration(self) >= duration('1s')",message="waitReadyTimeout must be at least 1 second"
 	WaitReadyTimeout *metav1.Duration `json:"waitReadyTimeout,omitempty"`
 
 	// SkipInitRuntime allows to skip init runtime for sandbox while claiming

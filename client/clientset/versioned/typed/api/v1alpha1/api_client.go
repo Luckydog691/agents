@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -28,11 +28,12 @@ import (
 type ApiV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	CheckpointsGetter
+	CommitsGetter
 	SandboxesGetter
 	SandboxClaimsGetter
 	SandboxSetsGetter
 	SandboxTemplatesGetter
-	SandboxUpdateOpsesGetter
+	SandboxupdateopsGetter
 }
 
 // ApiV1alpha1Client is used to interact with features provided by the api group.
@@ -42,6 +43,10 @@ type ApiV1alpha1Client struct {
 
 func (c *ApiV1alpha1Client) Checkpoints(namespace string) CheckpointInterface {
 	return newCheckpoints(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) Commits(namespace string) CommitInterface {
+	return newCommits(c, namespace)
 }
 
 func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {
@@ -60,8 +65,8 @@ func (c *ApiV1alpha1Client) SandboxTemplates(namespace string) SandboxTemplateIn
 	return newSandboxTemplates(c, namespace)
 }
 
-func (c *ApiV1alpha1Client) SandboxUpdateOpses(namespace string) SandboxUpdateOpsInterface {
-	return newSandboxUpdateOpses(c, namespace)
+func (c *ApiV1alpha1Client) Sandboxupdateops(namespace string) SandboxUpdateOpsInterface {
+	return newSandboxupdateops(c, namespace)
 }
 
 // NewForConfig creates a new ApiV1alpha1Client for the given config.

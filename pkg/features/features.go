@@ -45,6 +45,17 @@ const (
 
 	// SandboxInPlaceResourceResizeGate enables in-place resource resize when claiming sandboxes.
 	SandboxInPlaceResourceResizeGate featuregate.Feature = "SandboxInPlaceResourceResize"
+
+	// SandboxMultiClusterNaming enables embedding a cluster ID hash in the Sandbox generateName
+	// to prevent naming collisions across multiple clusters.
+	SandboxMultiClusterNaming featuregate.Feature = "SandboxMultiClusterNaming"
+
+	// SecurityIdentityProviderGate enables issuing sandbox access tokens via an external
+	// identity provider service instead of random UUID generation.
+	SecurityIdentityProviderGate featuregate.Feature = "SecurityIdentityProvider"
+
+	// CommitGate enables the Commit controller to commit container images from Sandbox pods.
+	CommitGate featuregate.Feature = "Commit"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -55,6 +66,9 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxCreatePodInjectConfigGate: {Default: false, PreRelease: featuregate.Alpha},
 	CachePodLabelSelectorGate:        {Default: true, PreRelease: featuregate.Alpha},
 	SandboxInPlaceResourceResizeGate: {Default: true, PreRelease: featuregate.Alpha},
+	SandboxMultiClusterNaming:        {Default: false, PreRelease: featuregate.Alpha},
+	SecurityIdentityProviderGate:     {Default: false, PreRelease: featuregate.Alpha},
+	CommitGate:                       {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {

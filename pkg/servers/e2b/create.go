@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
@@ -37,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 // CreateSandbox allocates a Pod as a new sandbox
@@ -54,11 +54,18 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if parseErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
 	}
+	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
-	if sc.manager.GetInfra().HasTemplate(ctx, request.TemplateID) {
+	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
+		Namespace: namespace,
+		Name:      request.TemplateID,
+	}) {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
 		return sc.createSandboxWithClaim(ctx, request, user)
-	} else if sc.manager.GetInfra().HasCheckpoint(ctx, request.TemplateID) {
+	} else if sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{
+		Namespace:    namespace,
+		CheckpointID: request.TemplateID,
+	}) {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
 		return sc.createSandboxWithClone(ctx, request, user)
 	}
@@ -73,9 +80,10 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	claimStart := time.Now()
 	var accessToken string
 	if request.Secure {
-		accessToken = uuid.NewString()
+		accessToken = config.NewDefaultAccessToken()
 	}
 	opts := infra.ClaimSandboxOptions{
+		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
 		ClaimTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
@@ -165,6 +173,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	}
 
 	opts := infra.CloneSandboxOptions{
+		Namespace:    sc.getNamespaceOfUser(user),
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
 		CloneTimeout: time.Duration(request.Extensions.TimeoutSeconds) * time.Second,
@@ -273,7 +282,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	//   - if autoPause == true: Set `ShutdownTime` to `time.Now().Add(maxTimeout)` and clear `PauseTime`
 	//   - if autoPause == false: Set `ShutdownTime` to `time.Now().Add(maxTimeout)`
 	now := time.Now()
-	timeoutOptions := infra.TimeoutOptions{}
+	timeoutOptions := timeout.Options{}
 	if !request.Extensions.NeverTimeout {
 		if request.AutoPause {
 			timeoutOptions.ShutdownTime = TimeAfterSeconds(now, sc.maxTimeout)

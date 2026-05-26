@@ -227,15 +227,50 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	if pod.Status.Phase == corev1.PodRunning && pCond != nil && pCond.Status == corev1.ConditionTrue {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
+
+		// Sync PodInfo (IP/NodeName/UID) before Initialize to ensure runtimeURL is resolvable
+		// (pod IP may have changed after resume). Note: we intentionally do NOT set Ready=True
+		// here; Ready is only set after Initialize succeeds, so that sandbox-manager's
+		// NewSandboxResumeTask (which gates on state==Running, requiring Ready==True)
+		// won't observe a premature Running state before init/CSI-mount completes.
+		newStatus.NodeName = pod.Spec.NodeName
+		newStatus.SandboxIp = pod.Status.PodIP
+		newStatus.PodInfo = agentsv1alpha1.PodInfo{
+			PodIP:    pod.Status.PodIP,
+			NodeName: pod.Spec.NodeName,
+			PodUID:   pod.UID,
+		}
+
+		// re-initialize sandbox after resuming or upgrading (includes runtime re-init and CSI storage re-mount)
+		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+			klog.ErrorS(err, "post-resume initialization failed", "sandbox", klog.KObj(box))
+			r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
+				fmt.Sprintf("Failed to perform post-resume initialization: %v", err))
+			utils.SetSandboxCondition(newStatus, metav1.Condition{
+				Type:   string(agentsv1alpha1.RuntimeInitialized),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+				// TODO to differentiate init and mount errors
+				Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
+				LastTransitionTime: metav1.Now(),
+			})
+			return err
+		}
+		r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
+			"Post-resume initialization completed successfully")
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:               string(agentsv1alpha1.RuntimeInitialized),
+			Status:             metav1.ConditionTrue,
+			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+			Message:            "Runtime initialization completed",
+			LastTransitionTime: metav1.Now(),
+		})
+
+		// Initialize succeeded: now set Ready=True to signal sandbox-manager's
+		// NewSandboxResumeTask that all post-resume initialization is done.
 		rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
 		rCond.Status = metav1.ConditionStatus(pCond.Status)
 		rCond.LastTransitionTime = pCond.LastTransitionTime
-
-		// re-initialize sandbox after resuming or upgrading
-		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-			return err
-		}
-
 		utils.SetSandboxCondition(newStatus, *rCond)
 	}
 	return nil
@@ -402,8 +437,7 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 
 	// to avoid the performance issue, using the controller to inject csi containers
 	// fetch the configmap and parse the configuration based on the controller runtime
-	podTemplate := &pod.Spec
-	injectErr := sidecarutils.InjectPodTemplateCSIAndRuntimeSidecar(ctx, box, podTemplate, r.Client)
+	injectErr := sidecarutils.InjectSandboxRuntimes(ctx, box, pod, r.Client)
 	if injectErr != nil {
 		klog.ErrorS(injectErr, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(box))
 		return nil, injectErr
@@ -511,9 +545,29 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
-		klog.ErrorS(err, "Failed to perform re-init, re-mount initialization", "sandbox", klog.KObj(box))
+		klog.ErrorS(err, "post-upgrade initialization failed", "sandbox", klog.KObj(box))
+		r.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
+			fmt.Sprintf("Failed to perform post-upgrade initialization: %v", err))
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:   string(agentsv1alpha1.RuntimeInitialized),
+			Status: metav1.ConditionFalse,
+			Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+			// TODO to differentiate init and mount errors
+			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Runtime initialization failed: %v", err)),
+			LastTransitionTime: metav1.Now(),
+		})
 		return false, err
 	}
+
+	r.recorder.Event(box, corev1.EventTypeNormal, string(agentsv1alpha1.RuntimeInitialized),
+		"Post-upgrade initialization completed successfully")
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.RuntimeInitialized),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+		Message:            "Runtime initialization completed",
+		LastTransitionTime: metav1.Now(),
+	})
 
 	return true, nil
 }
@@ -537,10 +591,12 @@ func (r *commonControl) executeUpgradeAction(ctx context.Context, pod *corev1.Po
 
 	exitCode, stdout, stderr, err := r.lifecycleHookFunc(ctx, box, action)
 	if err != nil {
-		return upgradeActionResult{Succeeded: false, Message: fmt.Sprintf("hook execution error: %v", err)}
+		msg := fmt.Sprintf("hook execution error: %v, stderr: %s, stdout: %s", err, stderr, stdout)
+		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
 	}
 	if exitCode != 0 {
-		return upgradeActionResult{Succeeded: false, Message: fmt.Sprintf("hook failed with exit code %d, stdout: %s, stderr: %s", exitCode, stdout, stderr)}
+		msg := fmt.Sprintf("hook failed with exit code %d, stderr: %s, stdout: %s", exitCode, stderr, stdout)
+		return upgradeActionResult{Succeeded: false, Message: utils.TruncateConditionMessage(msg)}
 	}
 	return upgradeActionResult{Succeeded: true, Message: fmt.Sprintf("hook succeeded, stdout: %s", stdout)}
 }

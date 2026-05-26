@@ -118,7 +118,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	recordSandboxSetMetrics(sbs)
 
 	// Preparation
-	newStatus, err := r.initNewStatus(sbs)
+	newStatus, err := r.initNewStatus(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to init new status")
 		return ctrl.Result{}, err
@@ -246,7 +246,12 @@ func (r *Reconciler) scaleDown(ctx context.Context, count int, sbs *agentsv1alph
 	log.Info("scale down", "count", count)
 
 	// Separate candidates into old revision and updated revision.
-	candidates := append(groups.Creating, groups.Available...)
+	// Allocate a new slice to avoid aliasing the backing arrays of Creating
+	// and Available. Using append(Creating, Available...) would mutate
+	// Creating's backing array when it has spare capacity.
+	candidates := make([]*agentsv1alpha1.Sandbox, 0, len(groups.Creating)+len(groups.Available))
+	candidates = append(candidates, groups.Creating...)
+	candidates = append(candidates, groups.Available...)
 	var oldCandidates, updatedCandidates []*agentsv1alpha1.Sandbox
 	for _, sbx := range candidates {
 		if sbx.Labels[agentsv1alpha1.LabelTemplateHash] != updateRevision {
@@ -327,7 +332,19 @@ func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alph
 }
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {
-	sbx := NewSandboxFromSandboxSet(sbs)
+	var refTemplate *agentsv1alpha1.SandboxTemplate
+	if sbs.Spec.TemplateRef != nil {
+		refTemplate = &agentsv1alpha1.SandboxTemplate{}
+		if err := r.Get(ctx, client.ObjectKey{
+			Namespace: sbs.Namespace,
+			Name:      sbs.Spec.TemplateRef.Name,
+		}, refTemplate); err != nil {
+			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to resolve sandbox template: %s", err)
+			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
+				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
+		}
+	}
+	sbx := NewSandboxFromSandboxSet(sbs, refTemplate)
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
@@ -336,6 +353,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to create sandbox: %s", err)
 		return nil, err
 	}
+	sandboxSetSandboxesCreatedTotal.WithLabelValues(sbs.Namespace, sbs.Name).Inc()
 	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxCreated, "Sandbox %s created", klog.KObj(sbx))
 	return sbx, nil
@@ -348,6 +366,8 @@ func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.S
 		log.Info("sandbox to be scaled down claimed before performed, skip")
 		return errors.New("sandbox to be scaled down claimed before performed, skip")
 	}
+	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
+	sbx = sbx.DeepCopy()
 	managerutils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
 	if err = r.Update(ctx, sbx); err != nil {
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)

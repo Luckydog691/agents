@@ -31,7 +31,7 @@ jobs:
       - name: Checkout Actions Repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Check spelling with custom config file
-        uses: crate-ci/typos@7c572958218557a3272c2d6719629443b5cc26fd # v1.45.2
+        uses: crate-ci/typos@aca895bf05aec0cb7dffa6f94495e923224d9f17 # v1.46.2
         with:
           config: ./typos.toml
 
@@ -65,7 +65,7 @@ jobs:
           skip-pkg-cache: true
           mod: readonly
       - name: Run Trivy vulnerability scanner in repo mode
-        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # master
         with:
           scan-type: 'fs'
           ignore-unfixed: true
@@ -73,7 +73,7 @@ jobs:
           output: 'trivy-results.sarif'
           severity: 'CRITICAL'
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
+        uses: github/codeql-action/upload-sarif@9e0d7b8d25671d64c341c19c0152d693099fb5ba # v4.35.5
         with:
           sarif_file: 'trivy-results.sarif'
 
@@ -100,7 +100,7 @@ jobs:
           make test
           git status
       - name: Publish Unit Test Coverage
-        uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6.0.1
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
         with:

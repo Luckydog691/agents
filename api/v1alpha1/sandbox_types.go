@@ -47,6 +47,9 @@ const (
 	// RuntimeConfigForInjectAgentRuntime is a valid value for RuntimeConfig.Name.
 	// When set, enables agent runtime sidecar injection for the sandbox.
 	RuntimeConfigForInjectAgentRuntime = "agent-runtime"
+	// RuntimeConfigForInjectEgressControl is a valid value for RuntimeConfig.Name.
+	// When set, enables egress control sidecar injection for the sandbox.
+	RuntimeConfigForInjectEgressControl = "egress-control"
 )
 
 type RuntimeConfig struct {
@@ -68,6 +71,7 @@ type SandboxSpec struct {
 	Paused bool `json:"paused,omitempty"`
 
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
+	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
 
 	// ShutdownTime - Absolute time when the sandbox is deleted.
@@ -77,6 +81,7 @@ type SandboxSpec struct {
 
 	// Runtimes - Runtime configuration for sandbox object
 	// +optional
+	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
 
 	// PauseTime - Absolute time when the sandbox will be paused automatically.
@@ -260,8 +265,10 @@ const (
 // TODO Some external controllers have specific conditions, whether to keep them
 type PodInfo struct {
 	// Annotations contains pod important annotations
+	// +mapType=granular
 	Annotations map[string]string `json:"annotations,omitempty"`
 	// Labels contains pod important labels
+	// +mapType=granular
 	Labels map[string]string `json:"labels,omitempty"`
 	// NodeName indicates in which node this pod is scheduled.
 	NodeName string `json:"nodeName,omitempty"`
@@ -291,6 +298,11 @@ const (
 
 	// SandboxConditionUpgrading means upgrade state.
 	SandboxConditionUpgrading SandboxConditionType = "Upgrading"
+
+	// RuntimeInitialized means the agent-runtime inside
+	// the sandbox pod has completed initialization (first-time init or re-init
+	// after resume/recreate/upgrade).
+	RuntimeInitialized SandboxConditionType = "RuntimeInitialized"
 )
 
 const (
@@ -321,6 +333,10 @@ const (
 	// SandboxConditionResume Reason
 	SandboxResumeReasonCreatePod = "CreatePod"
 	SandboxResumeReasonResumePod = "ResumePod"
+
+	// SandboxConditionRuntimeInit Reason
+	SandboxConditionRuntimeInitReasonSucceeded = "Succeeded"
+	SandboxConditionRuntimeInitReasonFailed    = "Failed"
 )
 
 // +genclient

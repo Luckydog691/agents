@@ -28,6 +28,7 @@ import (
 )
 
 type ClaimSandboxOptions struct {
+	Namespace string `json:"namespace,omitempty"`
 	// User specifies the owner of sandbox, Required
 	User string `json:"user"`
 	// Template specifies the pool to claim sandbox from, Required
@@ -50,6 +51,8 @@ type ClaimSandboxOptions struct {
 	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
 	// Set CSIMount to non-nil value to mount a CSI volume
 	CSIMount *config.CSIMountOptions `json:"CSIMount"`
+	// Set SecurityToken value in runtime
+	SecurityToken *config.SecurityTokenOptions `json:"securityToken"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
 	// Max WaitReadyTimeout duration
@@ -62,6 +65,7 @@ type ClaimSandboxOptions struct {
 }
 
 type CloneSandboxOptions struct {
+	Namespace          string                  `json:"namespace,omitempty"`
 	User               string                  `json:"user"`
 	CheckPointID       string                  `json:"checkPointID"`
 	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`
@@ -80,16 +84,25 @@ type CreateCheckpointOptions struct {
 }
 
 type ClaimMetrics struct {
-	Retries     int
-	Total       time.Duration
-	Wait        time.Duration
-	RetryCost   time.Duration
-	PickAndLock time.Duration
-	WaitReady   time.Duration
-	InitRuntime time.Duration
-	CSIMount    time.Duration
-	LockType    LockType
-	LastError   error
+	Retries             int
+	Total               time.Duration
+	Wait                time.Duration
+	RetryCost           time.Duration
+	PickAndLock         time.Duration
+	WaitReady           time.Duration
+	InitRuntime         time.Duration
+	CSIMount            time.Duration
+	SecurityToken       time.Duration
+	LockType            LockType
+	LastError           error
+	PickSandboxFailures []PickSandboxFailure
+}
+
+// PickSandboxFailure describes a group of claim attempts that failed with the same picked sandbox and reason.
+type PickSandboxFailure struct {
+	Key    string `json:"key"`
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
 }
 
 type LockType string
@@ -100,17 +113,54 @@ const (
 	LockTypeSpeculate = LockType("speculate")
 )
 
-func (m ClaimMetrics) String() string {
+func (m *ClaimMetrics) String() string {
 	var lastErrStr string
 	if m.LastError != nil {
 		// Replace newlines and control characters to ensure single-line output
-		errMsg := m.LastError.Error()
-		// Replace common control characters with space
-		replacer := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
-		lastErrStr = replacer.Replace(errMsg)
+		lastErrStr = sanitizeErrorMessage(m.LastError)
 	}
-	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, LastError: %v}",
-		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, lastErrStr)
+	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, SecurityToken: %v, LastError: %v}",
+		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, m.SecurityToken, lastErrStr)
+}
+
+// RecordPickSandboxFailure records one failed claim attempt and aggregates repeated key/reason pairs.
+func (m *ClaimMetrics) RecordPickSandboxFailure(key string, err error) {
+	if err == nil {
+		return
+	}
+	m.mergePickSandboxFailure(PickSandboxFailure{
+		Key:    key,
+		Reason: sanitizeErrorMessage(err),
+		Count:  1,
+	})
+}
+
+// MergePickSandboxFailures merges pre-aggregated pick failure records into the metrics.
+func (m *ClaimMetrics) MergePickSandboxFailures(failures []PickSandboxFailure) {
+	for _, failure := range failures {
+		m.mergePickSandboxFailure(failure)
+	}
+}
+
+func (m *ClaimMetrics) mergePickSandboxFailure(failure PickSandboxFailure) {
+	if failure.Count <= 0 {
+		failure.Count = 1
+	}
+	for i := range m.PickSandboxFailures {
+		if m.PickSandboxFailures[i].Key == failure.Key && m.PickSandboxFailures[i].Reason == failure.Reason {
+			m.PickSandboxFailures[i].Count += failure.Count
+			return
+		}
+	}
+	m.PickSandboxFailures = append(m.PickSandboxFailures, failure)
+}
+
+func sanitizeErrorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	replacer := strings.NewReplacer("\n", " ", "\r", " ", "\t", " ")
+	return replacer.Replace(err.Error())
 }
 
 type CloneMetrics struct {
