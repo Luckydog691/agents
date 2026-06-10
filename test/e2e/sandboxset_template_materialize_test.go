@@ -79,7 +79,7 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 	}
 
 	It("Case A - inline template is materialised with owner ref", func() {
-		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-a-%d", time.Now().UnixNano()), "nginx:stable-alpine3.23")
+		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-a-%d", time.Now().UnixNano()), imageOf("nginx:stable-alpine3.23"))
 		Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, sbs) })
 
@@ -110,7 +110,7 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 				Template: &corev1.PodTemplateSpec{
 					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"sandboxset": "ref"}},
 					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{{Name: "main", Image: "nginx:stable-alpine3.23"}},
+						Containers: []corev1.Container{{Name: "main", Image: imageOf("nginx:stable-alpine3.23")}},
 					},
 				},
 			},
@@ -152,7 +152,7 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 	})
 
 	It("Case C - updating the inline template creates a new SandboxTemplate", func() {
-		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-c-%d", time.Now().UnixNano()), "nginx:stable-alpine3.23")
+		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-c-%d", time.Now().UnixNano()), imageOf("nginx:stable-alpine3.23"))
 		Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 		DeferCleanup(func() { _ = k8sClient.Delete(ctx, sbs) })
 
@@ -165,7 +165,7 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 
 		By("Changing the inline image triggers a new materialised SBT")
 		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-		sbs.Spec.Template.Spec.Containers[0].Image = "nginx:stable-alpine3.20"
+		sbs.Spec.Template.Spec.Containers[0].Image = imageOf("nginx:stable-alpine3.20")
 		Expect(k8sClient.Update(ctx, sbs)).To(Succeed())
 
 		Eventually(func() string {
@@ -178,7 +178,7 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 	})
 
 	It("Case D - deleting the SandboxSet cascades to owned SBTs", func() {
-		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-d-%d", time.Now().UnixNano()), "nginx:stable-alpine3.23")
+		sbs := buildInlineSandboxSet(fmt.Sprintf("sbs-mat-d-%d", time.Now().UnixNano()), imageOf("nginx:stable-alpine3.23"))
 		Expect(k8sClient.Create(ctx, sbs)).To(Succeed())
 
 		var sbtName string

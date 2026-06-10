@@ -49,9 +49,9 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 	var (
 		ctx          = context.Background()
 		namespace    string
-		initialImage = "centos:7"
-		updateImage  = "centos:8"
-		badImage     = "centos:non-existent-tag-999"
+		initialImage = imageOf("centos:7")
+		updateImage  = imageOf("centos:8")
+		badImage     = imageOf("centos:non-existent-tag-999")
 		batchLabel   = "e2e-ops-batch"
 	)
 
@@ -102,7 +102,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 							InitContainers: []corev1.Container{
 								{
 									Name:    "runtime",
-									Image:   "openkruise/agent-runtime:v0.2.0",
+									Image:   imageOf("openkruise/agent-runtime:v0.2.0"),
 									Command: []string{"sh", "/workspace/entrypoint.sh"},
 									VolumeMounts: []corev1.VolumeMount{
 										{Name: "envd-volume", MountPath: "/mnt/envd"},

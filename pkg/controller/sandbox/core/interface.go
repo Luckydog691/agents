@@ -72,7 +72,9 @@ type SandboxControlArgs struct {
 
 func NewSandboxControl(args SandboxControlArgs) map[string]SandboxControl {
 	controls := map[string]SandboxControl{}
-	controls[CommonControlName] = NewCommonControl(args)
+	common := NewCommonControl(args)
+	controls[CommonControlName] = common
+	controls[RuncControlName] = NewRuncControl(args, common)
 	return controls
 }
 

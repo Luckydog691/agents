@@ -57,6 +57,11 @@ const (
 	// SandboxPauseCheckpointGate enables creating Checkpoint CRs during sandbox pause
 	// to capture pod state for resume.
 	SandboxPauseCheckpointGate featuregate.Feature = "SandboxPauseCheckpoint"
+
+	// RuncPauseResumeGate enables runc in-place pause/resume via Agent DaemonSet.
+	// When enabled, pods running on runc runtime will be frozen/thawed in-place
+	// using ctr task pause/resume instead of being deleted and recreated.
+	RuncPauseResumeGate featuregate.Feature = "RuncPauseResume"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -70,6 +75,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxMultiClusterNaming:        {Default: false, PreRelease: featuregate.Alpha},
 	SecurityIdentityProviderGate:     {Default: false, PreRelease: featuregate.Alpha},
 	SandboxPauseCheckpointGate:       {Default: false, PreRelease: featuregate.Alpha},
+	RuncPauseResumeGate:              {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

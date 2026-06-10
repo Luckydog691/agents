@@ -18,6 +18,8 @@ package e2e
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -43,6 +45,32 @@ var (
 	LabelIt       = "it"
 	Namespace     = "default"
 )
+
+// imageOf returns a fully-qualified image reference, prepending the value of
+// the E2E_IMAGE_REGISTRY environment variable when it is set.
+//
+// When E2E_IMAGE_REGISTRY is empty, the original short name is returned
+// unchanged (default upstream behaviour, e.g. "nginx:stable-alpine3.23").
+//
+// When set to e.g. "cr.registry.inter.env149.shuguang.com/acs", the result
+// becomes "cr.registry.inter.env149.shuguang.com/acs/nginx:stable-alpine3.23",
+// allowing private-cloud environments without dockerhub access to pull the
+// images from a local mirror.
+//
+// References that already include a registry host (i.e. contain "/" before
+// the first ":") are returned unchanged so callers can mix prefixed and
+// non-prefixed references freely.
+func imageOf(shortName string) string {
+	prefix := strings.TrimRight(os.Getenv("E2E_IMAGE_REGISTRY"), "/")
+	if prefix == "" {
+		return shortName
+	}
+	// Already fully qualified (contains a registry host with a dot before the first slash).
+	if slash := strings.Index(shortName, "/"); slash > 0 && strings.ContainsAny(shortName[:slash], ".:") {
+		return shortName
+	}
+	return prefix + "/" + shortName
+}
 
 func init() {
 	scheme = runtime.NewScheme()

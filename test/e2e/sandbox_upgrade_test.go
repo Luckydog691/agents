@@ -45,9 +45,9 @@ var _ = Describe("Sandbox Upgrade Lifecycle", func() {
 
 	BeforeEach(func() {
 		namespace = createNamespace(ctx)
-		initialImage = "centos:7"
-		updateImage = "centos:8"
-		failedImage = "nginx:alpine3.20"
+		initialImage = imageOf("centos:7")
+		updateImage = imageOf("centos:8")
+		failedImage = imageOf("nginx:alpine3.20")
 	})
 
 	AfterEach(func() {
@@ -76,7 +76,7 @@ var _ = Describe("Sandbox Upgrade Lifecycle", func() {
 							InitContainers: []corev1.Container{
 								{
 									Name:    "runtime",
-									Image:   "openkruise/agent-runtime:v0.2.0",
+									Image:   imageOf("openkruise/agent-runtime:v0.2.0"),
 									Command: []string{"sh", "/workspace/entrypoint.sh"},
 									VolumeMounts: []corev1.VolumeMount{
 										{

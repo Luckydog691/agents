@@ -44,7 +44,7 @@ var _ = Describe("SandboxSet", func() {
 
 	BeforeEach(func() {
 		namespace = createNamespace(ctx)
-		initialImage = "nginx:stable-alpine3.23"
+		initialImage = imageOf("nginx:stable-alpine3.23")
 		// Create a basic SandboxSet resource
 		sandbox = &agentsv1alpha1.SandboxSet{
 			ObjectMeta: metav1.ObjectMeta{
@@ -355,7 +355,7 @@ var _ = Describe("SandboxSet", func() {
 				Name:      sandbox.Name,
 				Namespace: sandbox.Namespace,
 			}, sandbox)).To(Succeed())
-			sandbox.Spec.Template.Spec.Containers[0].Image = "nginx:stable-alpine3.20"
+			sandbox.Spec.Template.Spec.Containers[0].Image = imageOf("nginx:stable-alpine3.20")
 			Expect(k8sClient.Update(ctx, sandbox)).To(Succeed())
 
 			By("Starting a monitor goroutine to detect AvailableReplicas<9 violations during rolling update")
@@ -420,8 +420,8 @@ var _ = Describe("SandboxSet", func() {
 			By("Creating two SandboxTemplates with different images")
 			sbtV1Name := fmt.Sprintf("test-sbt-v1-%d", time.Now().UnixNano())
 			sbtV2Name := fmt.Sprintf("test-sbt-v2-%d", time.Now().UnixNano())
-			sbtV1Image := "nginx:stable-alpine3.23"
-			sbtV2Image := "nginx:stable-alpine3.20"
+			sbtV1Image := imageOf("nginx:stable-alpine3.23")
+			sbtV2Image := imageOf("nginx:stable-alpine3.20")
 			sbtV1 := &agentsv1alpha1.SandboxTemplate{
 				ObjectMeta: metav1.ObjectMeta{Name: sbtV1Name, Namespace: namespace},
 				Spec: agentsv1alpha1.SandboxTemplateSpec{

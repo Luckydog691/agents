@@ -1,0 +1,81 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-system
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: openkruise-sandbox-agent
+  namespace: sandbox-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: openkruise-sandbox-agent
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["pods/status"]
+  verbs: ["patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: openkruise-sandbox-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: openkruise-sandbox-agent
+subjects:
+- kind: ServiceAccount
+  name: openkruise-sandbox-agent
+  namespace: sandbox-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: openkruise-sandbox-agent
+  namespace: sandbox-system
+  labels:
+    app: openkruise-sandbox-agent
+spec:
+  selector:
+    matchLabels:
+      app: openkruise-sandbox-agent
+  template:
+    metadata:
+      labels:
+        app: openkruise-sandbox-agent
+    spec:
+      serviceAccountName: openkruise-sandbox-agent
+      hostPID: true
+      tolerations:
+      - operator: Exists
+      containers:
+      - name: agent
+        image: cr.registry.inter.env149.shuguang.com/acs/openkruise-sandbox-agent:v0.1.0-runc-pause
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        securityContext:
+          privileged: true
+          runAsUser: 0
+        volumeMounts:
+        - name: host-usr-bin
+          mountPath: /host/usr/bin
+          readOnly: true
+        - name: host-run-containerd
+          mountPath: /run/containerd
+          readOnly: true
+      volumes:
+      - name: host-usr-bin
+        hostPath:
+          path: /usr/bin
+      - name: host-run-containerd
+        hostPath:
+          path: /run/containerd

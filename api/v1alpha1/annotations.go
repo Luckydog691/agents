@@ -41,6 +41,21 @@ const (
 	AnnotationCSIVolumeConfig = E2BPrefix + "csi-volume-config"
 )
 
+// runc pause/resume annotations
+const (
+	// AnnotationRuncPause triggers the Agent to execute ctr task pause.
+	// Value is a JSON array of container IDs to pause.
+	AnnotationRuncPause = InternalPrefix + "runc-pause"
+
+	// AnnotationRuncResume triggers the Agent to execute ctr task resume.
+	// Value is a JSON array of container IDs to resume.
+	AnnotationRuncResume = InternalPrefix + "runc-resume"
+
+	// AnnotationSandboxRuntime explicitly overrides the runtime routing.
+	// Valid values: "runc", "runsc".
+	AnnotationSandboxRuntime = InternalPrefix + "sandbox-runtime"
+)
+
 // LabelSandboxUpdateOps marks which SandboxUpdateOps is operating on this sandbox.
 const LabelSandboxUpdateOps = InternalPrefix + "update-ops"
 

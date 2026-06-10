@@ -1,0 +1,19 @@
+# JSON patch that turns on the RuncPauseResume feature gate on the
+# agent-sandbox-controller deployment. Apply this on top of
+# `controller-deployment.yaml` to switch a cluster from the default
+# delete-and-recreate pause flow into the runc in-place pause/resume flow,
+# then run the dedicated runc e2e suite:
+#
+#   kubectl -n sandbox-system patch deployment agent-sandbox-controller \
+#     --type=json --patch-file deploy/controller-deployment.runc-e2e-patch.yaml
+#
+#   ./bin/e2e.test -ginkgo.focus="runc in-place pause and resume"
+#
+# Revert by re-applying `controller-deployment.yaml`.
+- op: replace
+  path: /spec/template/spec/containers/0/args
+  value:
+  - --health-probe-bind-address=:8081
+  - --metrics-bind-address=0
+  - --feature-gates=RuncPauseResume=true
+  - --v=4

@@ -350,6 +350,9 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				},
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "test-container", ContainerID: "containerd://abc123"},
+					},
 				},
 			},
 			expectedPhase: agentsv1alpha1.SandboxPaused,
@@ -396,6 +399,9 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				},
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "test-container", ContainerID: "containerd://def456"},
+					},
 				},
 			},
 			expectedPhase: agentsv1alpha1.SandboxResuming,
@@ -1824,8 +1830,8 @@ func TestCalculateStatus(t *testing.T) {
 						if cond.Status != metav1.ConditionFalse {
 							t.Errorf("Resumed condition status should be false, got %s", cond.Status)
 						}
-						if cond.Reason != agentsv1alpha1.SandboxResumeReasonCreatePod {
-							t.Errorf("Resumed condition reason should be CreatePod, got %s", cond.Reason)
+						if cond.Reason != agentsv1alpha1.SandboxResumeReasonResumePod {
+							t.Errorf("Resumed condition reason should be ResumePod, got %s", cond.Reason)
 						}
 					}
 				}

@@ -84,7 +84,7 @@ func newCheckpointSandbox(namespace string) *agentsv1alpha1.Sandbox {
 						Containers: []corev1.Container{
 							{
 								Name:  "main",
-								Image: "nginx:stable-alpine3.20",
+								Image: imageOf("nginx:stable-alpine3.20"),
 								Ports: []corev1.ContainerPort{
 									{Name: "http", ContainerPort: 80},
 								},
@@ -227,7 +227,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Verifying pod exists after resume")
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, nn, pod)).To(Succeed())
-			Expect(pod.Spec.Containers[0].Image).To(Equal("nginx:stable-alpine3.20"))
+			Expect(pod.Spec.Containers[0].Image).To(Equal(imageOf("nginx:stable-alpine3.20")))
 		})
 	})
 
@@ -373,7 +373,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, nn, pod)).To(Succeed())
 			patch := client.MergeFrom(pod.DeepCopy())
-			pod.Spec.Containers[0].Image = "nginx:stable-alpine3.23"
+			pod.Spec.Containers[0].Image = imageOf("nginx:stable-alpine3.23")
 			Expect(k8sClient.Patch(ctx, pod, patch)).To(Succeed())
 
 			By("Waiting for pod to be ready with new image")
@@ -516,7 +516,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 								InitContainers: []corev1.Container{
 									{
 										Name:          "sidecar",
-										Image:         "nginx:stable-alpine3.20",
+										Image:         imageOf("nginx:stable-alpine3.20"),
 										RestartPolicy: &alwaysRestart,
 										Command:       []string{"nginx", "-g", "daemon off;"},
 									},
@@ -524,7 +524,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "main",
-										Image: "nginx:stable-alpine3.20",
+										Image: imageOf("nginx:stable-alpine3.20"),
 										Ports: []corev1.ContainerPort{
 											{Name: "http", ContainerPort: 80},
 										},
@@ -548,7 +548,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			patch := client.MergeFrom(pod.DeepCopy())
 			for i := range pod.Spec.InitContainers {
 				if pod.Spec.InitContainers[i].Name == "sidecar" {
-					pod.Spec.InitContainers[i].Image = "nginx:stable-alpine3.23"
+					pod.Spec.InitContainers[i].Image = imageOf("nginx:stable-alpine3.23")
 				}
 			}
 			Expect(k8sClient.Patch(ctx, pod, patch)).To(Succeed())
@@ -664,7 +664,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "main",
-										Image: "nginx:stable-alpine3.20",
+										Image: imageOf("nginx:stable-alpine3.20"),
 										Resources: corev1.ResourceRequirements{
 											Requests: corev1.ResourceList{
 												corev1.ResourceCPU:    resource.MustParse("100m"),
@@ -749,11 +749,13 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 
 		It("should preserve runtime-injected container config after pause/resume despite ConfigMap update", func() {
 			const (
-				runtimeName     = "e2e-sidecar"
-				configMapNS     = "sandbox-system"
-				configMapName   = "sandbox-injection-config"
-				sidecarImageOld = "busybox:1.35"
-				sidecarImageNew = "busybox:1.36"
+				runtimeName   = "e2e-sidecar"
+				configMapNS   = "sandbox-system"
+				configMapName = "sandbox-injection-config"
+			)
+			var (
+				sidecarImageOld = imageOf("busybox:1.35")
+				sidecarImageNew = imageOf("busybox:1.36")
 			)
 
 			By("Creating injection ConfigMap with runtime sidecar config")
@@ -818,7 +820,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 								Containers: []corev1.Container{
 									{
 										Name:  "main",
-										Image: "nginx:stable-alpine3.20",
+										Image: imageOf("nginx:stable-alpine3.20"),
 										Ports: []corev1.ContainerPort{
 											{Name: "http", ContainerPort: 80},
 										},
@@ -863,7 +865,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 					"containers": []map[string]any{
 						{
 							"name":  "main",
-							"image": "nginx:stable-alpine3.20",
+							"image": imageOf("nginx:stable-alpine3.20"),
 						},
 						{
 							"name":    runtimeName,

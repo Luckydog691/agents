@@ -406,10 +406,15 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			// delete paused condition
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			newStatus.Phase = agentsv1alpha1.SandboxResuming
+			// Pod still exists → runc in-place resume; Pod gone → common recreate
+			reason := agentsv1alpha1.SandboxResumeReasonCreatePod
+			if pod != nil {
+				reason = agentsv1alpha1.SandboxResumeReasonResumePod
+			}
 			rCond := metav1.Condition{
 				Type:               string(agentsv1alpha1.SandboxConditionResumed),
 				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+				Reason:             reason,
 				LastTransitionTime: metav1.Now(),
 			}
 			utils.SetSandboxCondition(newStatus, rCond)

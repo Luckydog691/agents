@@ -1,5 +1,5 @@
 /*
-Copyright 2025.
+Copyright 2026.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -19,61 +19,101 @@ package sandbox
 import (
 	"testing"
 
-	"k8s.io/apimachinery/pkg/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	"k8s.io/client-go/tools/record"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 )
 
-func TestNewSandboxControl(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
+func TestResolveControlName(t *testing.T) {
 	tests := []struct {
-		name        string
-		wantNil     bool
-		wantControl bool
+		name     string
+		pod      *corev1.Pod
+		expected string
 	}{
 		{
-			name:        "returns non-nil map with common control",
-			wantNil:     false,
-			wantControl: true,
+			name:     "nil pod returns common",
+			pod:      nil,
+			expected: core.CommonControlName,
+		},
+		{
+			name: "nil runtimeClassName returns runc",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{},
+			},
+			expected: core.RuncControlName,
+		},
+		{
+			name: "empty runtimeClassName returns runc",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					RuntimeClassName: ptr.To(""),
+				},
+			},
+			expected: core.RuncControlName,
+		},
+		{
+			name: "runc runtimeClassName returns runc",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					RuntimeClassName: ptr.To("runc"),
+				},
+			},
+			expected: core.RuncControlName,
+		},
+		{
+			name: "runsc runtimeClassName returns common (not runc)",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					RuntimeClassName: ptr.To("runsc"),
+				},
+			},
+			expected: core.CommonControlName,
+		},
+		{
+			name: "gvisor runtimeClassName returns common",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					RuntimeClassName: ptr.To("gvisor"),
+				},
+			},
+			expected: core.CommonControlName,
+		},
+		{
+			name: "annotation override runc",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationSandboxRuntime: "runc",
+					},
+				},
+				Spec: corev1.PodSpec{
+					RuntimeClassName: ptr.To("runsc"), // annotation takes priority
+				},
+			},
+			expected: core.RuncControlName,
+		},
+		{
+			name: "annotation override non-runc",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationSandboxRuntime: "runsc",
+					},
+				},
+				Spec: corev1.PodSpec{}, // would normally be runc (nil)
+			},
+			expected: core.CommonControlName,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-			recorder := record.NewFakeRecorder(10)
-			rl := core.NewRateLimiter()
-
-			controls := core.NewSandboxControl(core.SandboxControlArgs{
-				Client:      fakeClient,
-				Recorder:    recorder,
-				RateLimiter: rl,
-			})
-
-			if tt.wantNil && controls != nil {
-				t.Errorf("NewSandboxControl() expected nil, got %v", controls)
-			}
-			if !tt.wantNil && controls == nil {
-				t.Fatal("NewSandboxControl() returned nil, want non-nil")
-			}
-
-			if tt.wantControl {
-				ctrl, ok := controls[core.CommonControlName]
-				if !ok {
-					t.Fatalf("NewSandboxControl() missing key %q", core.CommonControlName)
-				}
-				if ctrl == nil {
-					t.Fatal("NewSandboxControl() common control is nil")
-				}
-				// Verify the returned value implements SandboxControl interface
-				var _ core.SandboxControl = ctrl
+			got := resolveControlName(tt.pod)
+			if got != tt.expected {
+				t.Errorf("resolveControlName() = %q, want %q", got, tt.expected)
 			}
 		})
 	}
