@@ -19,6 +19,7 @@ package job
 import (
 	"flag"
 	"os"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 )
@@ -57,6 +58,12 @@ const (
 
 	// EnvAgentJobImagePullPolicy is the environment variable name for the agent job image pull policy.
 	EnvAgentJobImagePullPolicy = "AGENT_JOB_IMAGE_PULL_POLICY"
+
+	// EnvAgentJobImagePullSecrets is the environment variable name for the agent job image pull secrets.
+	EnvAgentJobImagePullSecrets = "AGENT_JOB_IMAGE_PULL_SECRETS"
+
+	// EnvAgentJobMode is the environment variable name for the commit job mode (e.g. inner, common).
+	EnvAgentJobMode = "JOB_MODE"
 )
 
 var agentJobImage string
@@ -69,7 +76,8 @@ func init() {
 type EnvConfig struct{}
 
 func (c *EnvConfig) ContainerID() string { return os.Getenv(EnvContainerID) }
-func (c *EnvConfig) CommitImage() string { return os.Getenv(EnvCommitImage) }
+func (c *EnvConfig) CommitImage() string  { return os.Getenv(EnvCommitImage) }
+func (c *EnvConfig) JobMode() string      { return os.Getenv(EnvAgentJobMode) }
 func (c *EnvConfig) AgentJobImage() string {
 	if agentJobImage != "" {
 		return agentJobImage
@@ -96,6 +104,18 @@ func (c *EnvConfig) ImagePullPolicy() corev1.PullPolicy {
 		return corev1.PullPolicy(p)
 	}
 	return corev1.PullIfNotPresent
+}
+
+func (c *EnvConfig) AgentJobImagePullSecrets() []corev1.LocalObjectReference {
+	secrets := os.Getenv(EnvAgentJobImagePullSecrets)
+	if secrets == "" {
+		return nil
+	}
+	var refs []corev1.LocalObjectReference
+	for _, s := range strings.Split(secrets, ",") {
+		refs = append(refs, corev1.LocalObjectReference{Name: strings.TrimSpace(s)})
+	}
+	return refs
 }
 
 var defaultConfig = &EnvConfig{}

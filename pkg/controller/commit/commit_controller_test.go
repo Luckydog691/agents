@@ -206,6 +206,7 @@ func TestReconcile_CommitDeleting(t *testing.T) {
 	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseRunning)
 	commit.DeletionTimestamp = &now
 	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	commit.Status.CommitID = "sha256:abc123"
 	r, mock := newTestReconciler(commit)
 
 	_, err := r.Reconcile(context.TODO(), ctrl.Request{
@@ -216,6 +217,24 @@ func TestReconcile_CommitDeleting(t *testing.T) {
 	}
 	if !mock.deletedCalled {
 		t.Error("expected EnsureCommitDeleted to be called")
+	}
+}
+
+func TestReconcile_CommitDeleting_NoCommitID(t *testing.T) {
+	now := metav1.Now()
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhasePending)
+	commit.DeletionTimestamp = &now
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	r, mock := newTestReconciler(commit)
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mock.deletedCalled {
+		t.Error("expected EnsureCommitDeleted NOT to be called when commitID is empty")
 	}
 }
 
