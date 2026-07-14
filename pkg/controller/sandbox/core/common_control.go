@@ -552,9 +552,50 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 		}
 	}
 
-	// Step 3: Wait for new Pod to be running and ready
-	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	// Step 3: If the upgrade previously failed (UpgradePodFailed) and the
+	// pod's container is in a terminal state (terminated or non-transient
+	// waiting), delete the pod to force recreation. This gives the state
+	// machine self-healing ability: when a transient failure (e.g. temporary
+	// network issue causing ImagePullBackOff) resolves, the new pod may
+	// succeed without requiring any spec change from the user.
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if cond != nil && cond.Reason == agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed {
+		hasTerminalContainer := false
+		for _, cStatus := range pod.Status.ContainerStatuses {
+			if cStatus.State.Terminated != nil {
+				hasTerminalContainer = true
+				break
+			}
+			if cStatus.State.Waiting != nil {
+				reason := cStatus.State.Waiting.Reason
+				if reason != WaitingReasonPodInitializing && reason != WaitingReasonContainerCreating {
+					hasTerminalContainer = true
+					break
+				}
+			}
+		}
+		if hasTerminalContainer {
+			klog.InfoS("Deleting failed pod to force recreation for upgrade retry",
+				"sandbox", klog.KObj(box))
+			ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Delete, box.Name)
+			if err := r.Delete(ctx, pod); err != nil {
+				ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Delete, box.Name)
+				if !errors.IsNotFound(err) {
+					klog.ErrorS(err, "Failed to delete failed pod for upgrade retry",
+						"sandbox", klog.KObj(box))
+					return false, err
+				}
+			}
+			klog.InfoS("Deleted failed pod for upgrade retry", "sandbox", klog.KObj(box))
+			return false, nil
+		}
+	}
+
+	// Step 4: Wait for new Pod to be running and ready
+	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	if cond == nil {
+		cond = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	}
 	if pCond == nil || pCond.Status != corev1.ConditionTrue {
 		klog.InfoS("Waiting for new pod to be ready", "sandbox", klog.KObj(box))
 		for _, cStatus := range pod.Status.ContainerStatuses {
@@ -583,7 +624,7 @@ func (r *commonControl) performRecreateUpgrade(ctx context.Context, args EnsureF
 		return false, nil
 	}
 
-	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
+	// Step 5: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 		return false, err
 	}
