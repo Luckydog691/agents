@@ -46,6 +46,10 @@ func doCommitWith(ctx context.Context, opts CommitOptions, executor Executor) in
 	containerID := opts.ContainerID
 	image := opts.Image
 
+	if err := ValidateCommitCompression(opts.Compression); err != nil {
+		klog.ErrorS(err, "Invalid commit compression", "compression", opts.Compression)
+		return ExitCodeCommitFailed
+	}
 	if containerID == "" {
 		klog.ErrorS(nil, "Commit container ID is empty", "arg", ArgContainerID)
 		return ExitCodeCommitFailed

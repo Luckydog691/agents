@@ -62,19 +62,27 @@ const (
 var configuredCommitCompression = ""
 
 func init() {
-	flag.Func("commit-compression", "Layer compression for committed layers: gzip or zstd.", SetConfiguredCommitCompression)
+	flag.Func("commit-compression", "Layer compression: gzip or zstd. Requires a commit-job image with nerdctl v2.1.3 or newer.", SetConfiguredCommitCompression)
+}
+
+// ValidateCommitCompression validates a layer compression value.
+func ValidateCommitCompression(value string) error {
+	switch value {
+	case "", CommitCompressionGzip, CommitCompressionZstd:
+		return nil
+	default:
+		return fmt.Errorf("unsupported commit compression %q (supported: %s, %s)", value, CommitCompressionGzip, CommitCompressionZstd)
+	}
 }
 
 // SetConfiguredCommitCompression validates and stores the controller-wide
 // compression algorithm.
 func SetConfiguredCommitCompression(value string) error {
-	switch value {
-	case CommitCompressionGzip, CommitCompressionZstd:
-		configuredCommitCompression = value
-		return nil
-	default:
-		return fmt.Errorf("unsupported commit compression %q (supported: %s, %s)", value, CommitCompressionGzip, CommitCompressionZstd)
+	if err := ValidateCommitCompression(value); err != nil {
+		return err
 	}
+	configuredCommitCompression = value
+	return nil
 }
 
 // ConfiguredCommitCompression returns the controller-wide compression for new Jobs.

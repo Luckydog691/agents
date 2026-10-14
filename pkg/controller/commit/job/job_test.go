@@ -89,6 +89,13 @@ func TestDoCommitWith(t *testing.T) {
 			wantCalls: 0,
 		},
 		{
+			name:      "unsupported compression",
+			opts:      CommitOptions{ContainerID: "test-container-id", Image: "registry.example.com/app:v1", Compression: "lz4"},
+			executor:  func(ctx context.Context, opts ...CmdOpt) error { return nil },
+			wantCode:  ExitCodeCommitFailed,
+			wantCalls: 0,
+		},
+		{
 			name: "args passed correctly",
 			opts: CommitOptions{ContainerID: "ctr-123", Image: "reg.io/img:v2"},
 			executor: func(ctx context.Context, opts ...CmdOpt) error {
