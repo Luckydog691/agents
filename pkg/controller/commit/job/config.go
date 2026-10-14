@@ -17,7 +17,6 @@ limitations under the License.
 package job
 
 import (
-	"flag"
 	"fmt"
 	"os"
 
@@ -60,10 +59,6 @@ const (
 // CLI arg. Empty means not configured: nothing is passed down and nerdctl falls
 // back to its own default.
 var configuredCommitCompression = ""
-
-func init() {
-	flag.Func("commit-compression", "Layer compression: gzip or zstd. Requires a commit-job image with nerdctl v2.1.3 or newer.", SetConfiguredCommitCompression)
-}
 
 // ValidateCommitCompression validates a layer compression value.
 func ValidateCommitCompression(value string) error {

@@ -93,20 +93,30 @@ func TestSetConfiguredCommitCompression(t *testing.T) {
 	original := configuredCommitCompression
 	t.Cleanup(func() { configuredCommitCompression = original })
 
-	if original != "" {
-		t.Errorf("default configured compression = %q, want empty (not configured)", original)
+	tests := []struct {
+		name    string
+		initial string
+		value   string
+		want    string
+		wantErr bool
+	}{
+		{name: "unset", initial: CommitCompressionGzip, value: "", want: ""},
+		{name: "gzip", value: CommitCompressionGzip, want: CommitCompressionGzip},
+		{name: "zstd", value: CommitCompressionZstd, want: CommitCompressionZstd},
+		{name: "invalid", initial: CommitCompressionZstd, value: "lz4", want: CommitCompressionZstd, wantErr: true},
 	}
-	if err := SetConfiguredCommitCompression("zstd"); err != nil {
-		t.Fatalf("set zstd: %v", err)
-	}
-	if got := ConfiguredCommitCompression(); got != CommitCompressionZstd {
-		t.Errorf("got %q, want %q", got, CommitCompressionZstd)
-	}
-	if err := SetConfiguredCommitCompression("lz4"); err == nil {
-		t.Error("expected error for unsupported compression")
-	}
-	if got := ConfiguredCommitCompression(); got != CommitCompressionZstd {
-		t.Errorf("invalid value must not change the configured compression, got %q", got)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configuredCommitCompression = tt.initial
+			err := SetConfiguredCommitCompression(tt.value)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("SetConfiguredCommitCompression() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got := ConfiguredCommitCompression(); got != tt.want {
+				t.Errorf("configured compression = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

@@ -133,31 +133,43 @@ func TestGenerateCommitJob_CompressionArg(t *testing.T) {
 	original := configuredCommitCompression
 	t.Cleanup(func() { configuredCommitCompression = original })
 
-	compressionArg := func(t *testing.T, g *JobGenerator) string {
-		t.Helper()
-		job, err := g.GenerateCommitJob()
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		for _, a := range job.Spec.Template.Spec.Containers[0].Args {
-			if strings.HasPrefix(a, "--compression=") {
-				return strings.TrimPrefix(a, "--compression=")
+	tests := []struct {
+		name        string
+		compression string
+		want        string
+		wantErr     bool
+	}{
+		{name: "unset"},
+		{name: "gzip", compression: CommitCompressionGzip, want: CommitCompressionGzip},
+		{name: "zstd", compression: CommitCompressionZstd, want: CommitCompressionZstd},
+		{name: "invalid", compression: "lz4", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configuredCommitCompression = ""
+			err := SetConfiguredCommitCompression(tt.compression)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("SetConfiguredCommitCompression() error = %v, wantErr %v", err, tt.wantErr)
 			}
-		}
-		return ""
-	}
+			if tt.wantErr {
+				return
+			}
 
-	// Nothing is passed by default: no --compression arg, nerdctl uses its own default.
-	if got := compressionArg(t, newTestJobGenerator()); got != "" {
-		t.Errorf("--compression arg=%q, want absent by default", got)
-	}
-
-	// A controller configured with zstd propagates it to new Jobs.
-	if err := SetConfiguredCommitCompression("zstd"); err != nil {
-		t.Fatalf("set zstd: %v", err)
-	}
-	if got := compressionArg(t, newTestJobGenerator()); got != CommitCompressionZstd {
-		t.Errorf("--compression arg=%q, want %q", got, CommitCompressionZstd)
+			job, err := newTestJobGenerator().GenerateCommitJob()
+			if err != nil {
+				t.Fatalf("GenerateCommitJob() error = %v", err)
+			}
+			got := ""
+			for _, arg := range job.Spec.Template.Spec.Containers[0].Args {
+				if strings.HasPrefix(arg, "--compression=") {
+					got = strings.TrimPrefix(arg, "--compression=")
+				}
+			}
+			if got != tt.want {
+				t.Errorf("compression arg = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
